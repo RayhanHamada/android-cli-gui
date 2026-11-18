@@ -204,9 +204,7 @@ impl App {
             return;
         }
         let Some(cli) = self.sdk.cli.clone() else {
-            self.status = Some(Status::error(
-                "Android CLI (`android`) not found on PATH.",
-            ));
+            self.status = Some(Status::error("Android CLI (`android`) not found on PATH."));
             cx.notify();
             return;
         };
@@ -374,7 +372,10 @@ impl App {
     fn render_sdk_versions(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let (raw_query, query) = self.search_query(cx);
         let platforms = &self.sdk.platforms;
-        let installed_count = platforms.iter().filter(|platform| platform.installed).count();
+        let installed_count = platforms
+            .iter()
+            .filter(|platform| platform.installed)
+            .count();
         let available_count = platforms.len() - installed_count;
         let mut summary = format!("{installed_count} installed · {available_count} available");
         if !query.is_empty() {
@@ -419,7 +420,10 @@ impl App {
         let available_count = build_tools.len() - installed_count;
         let mut summary = format!("{installed_count} installed · {available_count} available");
         if !query.is_empty() {
-            let matching = build_tools.iter().filter(|tool| tool.matches(&query)).count();
+            let matching = build_tools
+                .iter()
+                .filter(|tool| tool.matches(&query))
+                .count();
             summary.push_str(&format!(" · {matching} matching"));
         }
 
@@ -695,11 +699,10 @@ impl App {
             .flex_col()
             .w_full()
             .child(
-                div().px_6().py_2().child(
-                    Label::new(summary)
-                        .text_size(px(11.))
-                        .text_color(muted),
-                ),
+                div()
+                    .px_6()
+                    .py_2()
+                    .child(Label::new(summary).text_size(px(11.)).text_color(muted)),
             )
             .child(header);
 

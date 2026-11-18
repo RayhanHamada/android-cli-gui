@@ -161,7 +161,11 @@ fn signal_process(pid: u32, force: bool) {
 
 /// Executable name of the official Android CLI on this platform.
 pub fn cli_binary_name() -> &'static str {
-    if cfg!(windows) { "android.exe" } else { "android" }
+    if cfg!(windows) {
+        "android.exe"
+    } else {
+        "android"
+    }
 }
 
 /// Find the official Android CLI on `PATH`.
@@ -407,8 +411,7 @@ fn run(
 
     let output = child.wait_with_output();
     running.finish();
-    let output =
-        output.map_err(|err| format!("Failed to wait for {}: {err}", bin.display()))?;
+    let output = output.map_err(|err| format!("Failed to wait for {}: {err}", bin.display()))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -576,7 +579,10 @@ Available packages:
     #[cfg(unix)]
     #[test]
     fn shutdown_stops_tracked_child() {
-        let mut child = Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
         let running = RunningCli::default();
         running.track_for_test(child.id());
 
