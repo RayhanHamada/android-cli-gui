@@ -362,6 +362,10 @@ impl App {
     }
 
     fn render_sdk_versions(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.sdk.cli.is_none() {
+            return self.render_cli_missing(cx);
+        }
+
         let mut content = div().flex().flex_col().w_full();
         content = content.child(self.render_cli_info(cx));
         content = content.child(self.render_search_bar(cx));
@@ -382,6 +386,65 @@ impl App {
                     )
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_cli_missing(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let error = self
+            .sdk
+            .error
+            .clone()
+            .unwrap_or_else(|| "Android CLI not found on PATH.".to_string());
+
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap_3()
+            .px_6()
+            .py_8()
+            .max_w(px(680.))
+            .child(
+                Label::new("Android CLI not found")
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().danger),
+            )
+            .child(
+                Label::new(error)
+                    .text_size(px(12.))
+                    .whitespace_normal(),
+            )
+            .child(
+                Label::new(
+                    "This app does not bundle the SDK: it reads and modifies the SDK by running \
+                     the official `android` CLI. Make sure the executable is on the PATH the app \
+                     inherits.",
+                )
+                .text_size(px(12.))
+                .text_color(muted)
+                .whitespace_normal(),
+            )
+            .child(
+                Label::new(
+                    "On macOS, apps launched from Finder do not read your shell profile, so a CLI \
+                     added to PATH in .zshrc or .bashrc will not be visible here. Add its directory \
+                     to the app's environment or launch the app from a terminal.",
+                )
+                .text_size(px(12.))
+                .text_color(muted)
+                .whitespace_normal(),
+            )
+            .child(
+                div().pt_2().child(
+                    Button::new("check-cli")
+                        .primary()
+                        .label("Check again")
+                        .icon(IconName::RefreshCw)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                 ),
             )
             .into_any_element()

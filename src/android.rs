@@ -133,22 +133,40 @@ fn signal_process(pid: u32, force: bool) {
     let _ = command.status();
 }
 
+/// Executable name of the official Android CLI on this platform.
+pub fn cli_binary_name() -> &'static str {
+    if cfg!(windows) { "android.exe" } else { "android" }
+}
+
 /// Find the official Android CLI on `PATH`.
 pub fn find_cli() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "android.exe" } else { "android" };
+    let name = cli_binary_name();
     let path_var = env::var_os("PATH")?;
     env::split_paths(&path_var)
         .map(|dir| dir.join(name))
-        .find(|path| path.is_file())
+        .find(|path| is_executable(path))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 pub fn snapshot() -> SdkSnapshot {
     let Some(cli) = find_cli() else {
         return SdkSnapshot {
-            error: Some(
-                "Android CLI (`android`) not found on PATH. Install it from tools/agents/android-cli."
-                    .to_string(),
-            ),
+            error: Some(format!(
+                "`{}` is not on PATH. Install the official Android CLI from https://developer.android.com/tools/agents/android-cli",
+                cli_binary_name()
+            )),
             ..SdkSnapshot::default()
         };
     };
@@ -434,6 +452,24 @@ Available packages:
 
         assert!(!status.success());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_executable_files_count_as_cli() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("acg-cli-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("android");
+        fs::write(&path, "#!/bin/sh\n").expect("write fake cli");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+        assert!(!is_executable(&path));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+        assert!(is_executable(&path));
+
+        fs::remove_dir_all(&dir).expect("clean temp dir");
     }
 
     #[test]
