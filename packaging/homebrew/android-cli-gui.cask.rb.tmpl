@@ -1,0 +1,27 @@
+cask "android-cli-gui" do
+  arch arm: "macos-arm64", intel: "macos-x86_64"
+
+  version "__VERSION__"
+  sha256 arm:   "__SHA256_MACOS_ARM64__",
+         intel: "__SHA256_MACOS_X86_64__"
+
+  url "https://github.com/RayhanHamada/android-cli-gui/releases/download/v#{version}/android-cli-gui-v#{version}-#{arch}.zip"
+  name "Android CLI GUI"
+  desc "Unofficial GUI for the official Android CLI"
+  homepage "https://github.com/RayhanHamada/android-cli-gui"
+
+  depends_on cask: "android-cli"
+  depends_on macos: :sequoia
+
+  app "Android CLI GUI.app"
+
+  uninstall quit: "io.github.rayhanhamada.android-cli-gui"
+
+  zap trash: [
+    "~/Library/Application Support/io.github.rayhanhamada.android-cli-gui",
+    "~/Library/Caches/io.github.rayhanhamada.android-cli-gui",
+    "~/Library/Saved Application State/io.github.rayhanhamada.android-cli-gui.savedState",
+  ]
+
+  caveats "If macOS blocks the first launch, open System Settings > Privacy & Security and choose Open Anyway."
+end

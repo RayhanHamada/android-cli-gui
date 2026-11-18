@@ -8,16 +8,31 @@ comes from the official Android CLI and Android SDK sources.
 
 ## Install
 
-Homebrew (macOS 15+):
+Homebrew cask (macOS 15+):
 
 ```sh
-brew install RayhanHamada/tap/android-cli-gui
+brew tap RayhanHamada/tap
+brew trust --cask RayhanHamada/tap/android-cli-gui
+brew install --cask RayhanHamada/tap/android-cli-gui
 ```
 
-Prebuilt binaries for Linux, macOS (Apple Silicon and Intel), and Windows are on the
-[releases page](https://github.com/RayhanHamada/android-cli-gui/releases).
+This installs `Android CLI GUI.app` in `/Applications` and the official
+[`android-cli`](https://developer.android.com/tools/agents/android-cli) cask as
+a dependency. Launch it from Applications, Launchpad, or Spotlight like any
+other Mac app.
 
-The official `android` CLI must be installed and available on `PATH`.
+Homebrew 7 requires trusting third-party casks before installation. On older
+Homebrew versions the `brew trust` step can be skipped.
+
+If you installed the old formula, remove it before switching:
+
+```sh
+brew uninstall android-cli-gui
+```
+
+Prebuilt applications for macOS (Apple Silicon and Intel), binaries for Linux
+and Windows, and checksums are on the
+[releases page](https://github.com/RayhanHamada/android-cli-gui/releases).
 
 ## Build from source
 
@@ -27,9 +42,20 @@ Requires Rust stable and the [GPUI platform dependencies](https://gpui-kit.com/d
 cargo run --release
 ```
 
+To build a macOS app bundle:
+
+```sh
+cargo build --release
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)"
+packaging/macos/make-app.sh target/release/android-cli-gui "$version" \
+  "target/Android CLI GUI.app"
+open "target/Android CLI GUI.app"
+```
+
 ## Releases
 
 Releases are managed by [Knope Bot](https://knope.tech/tutorials/bot-workflow/).
 Install the bot for this repository; it keeps a `knope/release` PR up to date.
 Merging that PR creates a draft GitHub release, and the Release workflow builds
-the binaries, uploads them, publishes the release, and updates the Homebrew tap.
+the packages, uploads them, publishes the release, and updates the Homebrew
+cask in the tap.

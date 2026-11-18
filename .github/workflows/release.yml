@@ -104,8 +104,20 @@ jobs:
       - name: Build
         shell: bash
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package (macOS app)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/Android CLI GUI.app"
+          packaging/macos/make-app.sh \
+            "target/${{ matrix.target }}/release/android-cli-gui" \
+            "$VERSION" "$app"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$app" \
+            "dist/android-cli-gui-v${VERSION}-${{ matrix.artifact }}.zip"
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -161,12 +173,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.get-tag.outputs.commit }}
+          ref: ${{ github.event.repository.default_branch }}
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - name: Render formula
+      - name: Render cask
         shell: bash
         env:
           VERSION: ${{ needs.get-tag.outputs.version }}
@@ -179,13 +191,13 @@ jobs:
 
           sed \
             -e "s/__VERSION__/${VERSION}/g" \
-            -e "s/__SHA256_MACOS_ARM64__/$(sha "android-cli-gui-v${VERSION}-aarch64-apple-darwin.tar.gz")/g" \
-            -e "s/__SHA256_MACOS_X86_64__/$(sha "android-cli-gui-v${VERSION}-x86_64-apple-darwin.tar.gz")/g" \
-            packaging/homebrew/android-cli-gui.rb.tmpl \
+            -e "s/__SHA256_MACOS_ARM64__/$(sha "android-cli-gui-v${VERSION}-macos-arm64.zip")/g" \
+            -e "s/__SHA256_MACOS_X86_64__/$(sha "android-cli-gui-v${VERSION}-macos-x86_64.zip")/g" \
+            packaging/homebrew/android-cli-gui.cask.rb.tmpl \
             > dist/android-cli-gui.rb
 
           ruby -c dist/android-cli-gui.rb
-      - name: Push formula to tap
+      - name: Push cask to tap
         shell: bash
         env:
           TAG: ${{ needs.get-tag.outputs.tag }}
@@ -202,16 +214,19 @@ jobs:
 
           rm -rf tap
           git clone --depth 1 git@github.com:RayhanHamada/homebrew-tap.git tap
-          mkdir -p tap/Formula
-          cp dist/android-cli-gui.rb tap/Formula/android-cli-gui.rb
+          mkdir -p tap/Casks
+          cp dist/android-cli-gui.rb tap/Casks/android-cli-gui.rb
+          if [[ -f tap/Formula/android-cli-gui.rb ]]; then
+            git -C tap rm Formula/android-cli-gui.rb
+          fi
 
           git -C tap config user.name "github-actions[bot]"
           git -C tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C tap add Formula/android-cli-gui.rb
+          git -C tap add Casks/android-cli-gui.rb
 
           if git -C tap diff --cached --quiet; then
-            echo "Formula is already up to date."
+            echo "Cask is already up to date."
           else
-            git -C tap commit -m "android-cli-gui ${TAG}"
+            git -C tap commit -m "android-cli-gui ${TAG} (cask)"
             git -C tap push origin HEAD:main
           fi
