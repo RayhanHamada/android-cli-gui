@@ -1,0 +1,16 @@
+[package]
+versioned_files = [
+    "Cargo.toml",
+    { path = "Cargo.lock", dependency = "android-cli-gui" },
+]
+changelog = "CHANGELOG.md"
+# Knope Bot creates a draft release when assets are configured. The Release
+# workflow attaches the binaries and publishes it.
+assets = "marker"
+
+[bot.releases]
+enabled = true
+
+[github]
+owner = "RayhanHamada"
+repo = "android-cli-gui"

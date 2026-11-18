@@ -26,3 +26,10 @@ Requires Rust stable and the [GPUI platform dependencies](https://gpui-kit.com/d
 ```sh
 cargo run --release
 ```
+
+## Releases
+
+Releases are managed by [Knope Bot](https://knope.tech/tutorials/bot-workflow/).
+Install the bot for this repository; it keeps a `knope/release` PR up to date.
+Merging that PR creates a draft GitHub release, and the Release workflow builds
+the binaries, uploads them, publishes the release, and updates the Homebrew tap.
