@@ -27,9 +27,6 @@ jobs:
       tag: ${{ steps.find.outputs.tag }}
       version: ${{ steps.find.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: main
       - name: Find Knope draft release
         id: find
         shell: bash
@@ -38,25 +35,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          package_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-
           for attempt in $(seq 1 30); do
             tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 \
               --json isDraft,tagName \
-              --jq '[.[] | select(.isDraft and (.tagName | startswith("v")))][0].tagName // ""')"
+              --jq '[.[] | select(.isDraft and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))][0].tagName // ""')"
 
             if [[ -n "$tag" ]]; then
-              if [[ "${tag#v}" == "$package_version" ]]; then
-                echo "tag=$tag" >> "$GITHUB_OUTPUT"
-                echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-                echo "Found draft release $tag."
-                exit 0
-              fi
-              echo "Draft release $tag does not match Cargo.toml version $package_version; waiting..."
-            else
-              echo "No draft release yet (attempt $attempt/30); waiting 10s..."
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+              echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+              echo "Found draft release $tag."
+              exit 0
             fi
 
+            echo "No draft release yet (attempt $attempt/30); waiting 10s..."
             sleep 10
           done
 
