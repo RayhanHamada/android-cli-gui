@@ -641,7 +641,8 @@ Available packages:
 
     #[test]
     fn search_paths_fall_back_to_standard_bin_dirs() {
-        let paths = search_paths_from(Some(std::ffi::OsStr::new("/usr/bin:/bin")));
+        let path_var = env::join_paths([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]).unwrap();
+        let paths = search_paths_from(Some(&path_var));
 
         assert_eq!(paths[0], PathBuf::from("/usr/bin"));
         assert!(paths.contains(&PathBuf::from("/usr/local/bin")));
@@ -651,7 +652,9 @@ Available packages:
 
     #[test]
     fn search_paths_do_not_duplicate_existing_dirs() {
-        let paths = search_paths_from(Some(std::ffi::OsStr::new("/usr/local/bin:/usr/bin")));
+        let path_var =
+            env::join_paths([PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin")]).unwrap();
+        let paths = search_paths_from(Some(&path_var));
 
         assert_eq!(
             paths
