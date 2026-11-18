@@ -1,3 +1,9 @@
+## 0.1.3 (2026-11-18)
+
+### Features
+
+- distribute the macOS app as a Homebrew cask (#7)
+
 ## 0.1.1 (2026-11-18)
 
 ### Features
