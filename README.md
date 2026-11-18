@@ -11,6 +11,8 @@ comes from the official Android CLI and Android SDK sources.
 Homebrew cask (macOS 15+):
 
 ```sh
+brew tap RayhanHamada/tap
+brew trust --cask RayhanHamada/tap/android-cli-gui
 brew install --cask RayhanHamada/tap/android-cli-gui
 ```
 
@@ -18,6 +20,9 @@ This installs `Android CLI GUI.app` in `/Applications` and the official
 [`android-cli`](https://developer.android.com/tools/agents/android-cli) cask as
 a dependency. Launch it from Applications, Launchpad, or Spotlight like any
 other Mac app.
+
+Homebrew 7 requires trusting third-party casks before installation. On older
+Homebrew versions the `brew trust` step can be skipped.
 
 If you installed the old formula, remove it before switching:
 
