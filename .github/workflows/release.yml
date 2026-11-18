@@ -91,7 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.get-tag.outputs.tag }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
@@ -161,7 +161,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.get-tag.outputs.tag }}
       - uses: actions/download-artifact@v8
         with:
           path: dist
