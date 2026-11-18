@@ -527,11 +527,7 @@ impl App {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().danger),
             )
-            .child(
-                Label::new(error)
-                    .text_size(px(12.))
-                    .whitespace_normal(),
-            )
+            .child(Label::new(error).text_size(px(12.)).whitespace_normal())
             .child(
                 Label::new(
                     "This app does not bundle the SDK: it reads and modifies the SDK by running \
