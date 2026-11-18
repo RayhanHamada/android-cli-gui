@@ -26,6 +26,7 @@ jobs:
     outputs:
       tag: ${{ steps.find.outputs.tag }}
       version: ${{ steps.find.outputs.version }}
+      commit: ${{ steps.find.outputs.commit }}
     steps:
       - name: Find Knope draft release
         id: find
@@ -41,9 +42,18 @@ jobs:
               --jq '[.[] | select(.isDraft and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))][0].tagName // ""')"
 
             if [[ -n "$tag" ]]; then
-              echo "tag=$tag" >> "$GITHUB_OUTPUT"
-              echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-              echo "Found draft release $tag."
+              commit="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                --json targetCommitish --jq '.targetCommitish')"
+              if [[ -z "$commit" ]]; then
+                echo "Draft release $tag has no target commit." >&2
+                exit 1
+              fi
+              {
+                echo "tag=$tag"
+                echo "version=${tag#v}"
+                echo "commit=$commit"
+              } >> "$GITHUB_OUTPUT"
+              echo "Found draft release $tag at $commit."
               exit 0
             fi
 
@@ -81,7 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.get-tag.outputs.tag }}
+          ref: ${{ needs.get-tag.outputs.commit }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
@@ -151,7 +161,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.get-tag.outputs.tag }}
+          ref: ${{ needs.get-tag.outputs.commit }}
       - uses: actions/download-artifact@v8
         with:
           path: dist
