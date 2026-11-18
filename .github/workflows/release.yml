@@ -46,18 +46,17 @@ jobs:
               --jq '[.[] | select(.isDraft and (.tagName | startswith("v")))][0].tagName // ""')"
 
             if [[ -n "$tag" ]]; then
-              version="${tag#v}"
-              if [[ "$version" != "$package_version" ]]; then
-                echo "Draft release $tag does not match Cargo.toml version $package_version." >&2
-                exit 1
+              if [[ "${tag#v}" == "$package_version" ]]; then
+                echo "tag=$tag" >> "$GITHUB_OUTPUT"
+                echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+                echo "Found draft release $tag."
+                exit 0
               fi
-              echo "tag=$tag" >> "$GITHUB_OUTPUT"
-              echo "version=$version" >> "$GITHUB_OUTPUT"
-              echo "Found draft release $tag."
-              exit 0
+              echo "Draft release $tag does not match Cargo.toml version $package_version; waiting..."
+            else
+              echo "No draft release yet (attempt $attempt/30); waiting 10s..."
             fi
 
-            echo "No draft release yet (attempt $attempt/30); waiting 10s..."
             sleep 10
           done
 
