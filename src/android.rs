@@ -168,13 +168,57 @@ pub fn cli_binary_name() -> &'static str {
     }
 }
 
-/// Find the official Android CLI on `PATH`.
+/// Find the official Android CLI on `PATH` or in a standard install location.
+///
+/// macOS apps launched from Finder inherit launchd's minimal `PATH`, not the
+/// login shell's. Homebrew installs the CLI at `/opt/homebrew/bin` (Apple
+/// Silicon) or `/usr/local/bin` (Intel), so check those too.
 pub fn find_cli() -> Option<PathBuf> {
     let name = cli_binary_name();
-    let path_var = env::var_os("PATH")?;
-    env::split_paths(&path_var)
+    search_paths()
+        .into_iter()
         .map(|dir| dir.join(name))
         .find(|path| is_executable(path))
+}
+
+fn search_paths() -> Vec<PathBuf> {
+    search_paths_from(env::var_os("PATH").as_deref())
+}
+
+fn search_paths_from(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = path_var
+        .map(env::split_paths)
+        .into_iter()
+        .flatten()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+
+    #[cfg(target_os = "macos")]
+    let extra = ["/opt/homebrew/bin", "/usr/local/bin"];
+    #[cfg(not(target_os = "macos"))]
+    let extra = ["/usr/local/bin"];
+
+    for dir in extra {
+        let dir = PathBuf::from(dir);
+        if !paths.contains(&dir) {
+            paths.push(dir);
+        }
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        let dir = PathBuf::from(home).join(".local/bin");
+        if !paths.contains(&dir) {
+            paths.push(dir);
+        }
+    }
+
+    paths
+}
+
+/// PATH for child `android` processes. Android tooling invokes helpers such as
+/// `java` and `adb`, so the GUI must hand them the same expanded PATH.
+fn child_path() -> std::ffi::OsString {
+    env::join_paths(search_paths()).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
 }
 
 #[cfg(unix)]
@@ -387,6 +431,7 @@ fn run(
     running: &RunningCli,
 ) -> Result<String, String> {
     let mut command = Command::new(bin);
+    command.env("PATH", child_path());
     if let Some(root) = root {
         command.arg(format!("--sdk={}", root.display()));
     }
@@ -592,6 +637,29 @@ Available packages:
 
         assert!(!status.success());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn search_paths_fall_back_to_standard_bin_dirs() {
+        let paths = search_paths_from(Some(std::ffi::OsStr::new("/usr/bin:/bin")));
+
+        assert_eq!(paths[0], PathBuf::from("/usr/bin"));
+        assert!(paths.contains(&PathBuf::from("/usr/local/bin")));
+        #[cfg(target_os = "macos")]
+        assert!(paths.contains(&PathBuf::from("/opt/homebrew/bin")));
+    }
+
+    #[test]
+    fn search_paths_do_not_duplicate_existing_dirs() {
+        let paths = search_paths_from(Some(std::ffi::OsStr::new("/usr/local/bin:/usr/bin")));
+
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| *path == &PathBuf::from("/usr/local/bin"))
+                .count(),
+            1
+        );
     }
 
     #[cfg(unix)]

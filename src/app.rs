@@ -535,18 +535,9 @@ impl App {
             .child(
                 Label::new(
                     "This app does not bundle the SDK: it reads and modifies the SDK by running \
-                     the official `android` CLI. Make sure the executable is on the PATH the app \
-                     inherits.",
-                )
-                .text_size(px(12.))
-                .text_color(muted)
-                .whitespace_normal(),
-            )
-            .child(
-                Label::new(
-                    "On macOS, apps launched from Finder do not read your shell profile, so a CLI \
-                     added to PATH in .zshrc or .bashrc will not be visible here. Add its directory \
-                     to the app's environment or launch the app from a terminal.",
+                     the official `android` CLI. Install the CLI from \
+                     developer.android.com/tools/agents/android-cli, then click Check again. \
+                     On macOS the app also checks /opt/homebrew/bin and /usr/local/bin.",
                 )
                 .text_size(px(12.))
                 .text_color(muted)
