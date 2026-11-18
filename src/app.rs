@@ -317,6 +317,7 @@ impl App {
             .flex_1()
             .h_full()
             .bg(cx.theme().background)
+            .child(self.render_cli_info(cx))
             .child(
                 div()
                     .flex()
@@ -470,7 +471,6 @@ impl App {
         }
 
         let mut content = div().flex().flex_col().w_full();
-        content = content.child(self.render_cli_info(cx));
         content = content.child(self.render_search_bar(cx));
 
         if let Some(status) = &self.status {
