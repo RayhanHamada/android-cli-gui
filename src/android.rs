@@ -41,6 +41,31 @@ impl Platform {
     }
 }
 
+/// An SDK package keyed by version rather than API level, e.g.
+/// `build-tools/36.0.0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildTool {
+    /// Package id accepted by `android sdk install|update|remove`.
+    pub package: String,
+    /// Version reported by the CLI.
+    pub version: String,
+    /// Human description reported by the CLI.
+    pub description: String,
+    /// Whether the package is installed or only available.
+    pub installed: bool,
+}
+
+impl BuildTool {
+    /// Case-insensitive match against the fields the search bar exposes.
+    /// `query` is expected to be lowercased by the caller.
+    pub fn matches(&self, query: &str) -> bool {
+        query.is_empty()
+            || self.package.to_lowercase().contains(query)
+            || self.version.to_lowercase().contains(query)
+            || self.description.to_lowercase().contains(query)
+    }
+}
+
 /// A point-in-time view of the SDK that the UI renders.
 #[derive(Clone, Debug, Default)]
 pub struct SdkSnapshot {
@@ -49,6 +74,7 @@ pub struct SdkSnapshot {
     pub cli_version: Option<String>,
     pub root: Option<PathBuf>,
     pub platforms: Vec<Platform>,
+    pub build_tools: Vec<BuildTool>,
     /// Non-fatal CLI or parse failure.
     pub error: Option<String>,
 }
@@ -187,13 +213,11 @@ pub fn snapshot() -> SdkSnapshot {
         ..SdkSnapshot::default()
     };
 
-    match run(
-        &cli,
-        root.as_deref(),
-        &["sdk", "list", "--all", "platforms*"],
-        &running,
-    ) {
-        Ok(output) => snapshot.platforms = parse_platforms(&output),
+    match run(&cli, root.as_deref(), &["sdk", "list", "--all"], &running) {
+        Ok(output) => {
+            snapshot.platforms = parse_platforms(&output);
+            snapshot.build_tools = parse_build_tools(&output);
+        }
         Err(err) => snapshot.error = Some(err),
     }
     snapshot
@@ -226,9 +250,16 @@ fn parse_info(output: &str) -> (Option<PathBuf>, Option<String>) {
     (root, version)
 }
 
-/// Parse `android sdk list --all platforms*` output. Both sections are kept
-/// and tagged, so the UI can show uninstalled versions alongside installed
-/// ones:
+/// One row of `android sdk list --all`, before filtering by package family.
+struct ListedPackage {
+    package: String,
+    version: String,
+    description: String,
+    installed: bool,
+}
+
+/// Parse `android sdk list --all` output. Both sections are kept and tagged,
+/// so the UI can show uninstalled versions alongside installed ones:
 ///
 /// ```text
 /// Installed packages:
@@ -236,10 +267,10 @@ fn parse_info(output: &str) -> (Option<PathBuf>, Option<String>) {
 /// Available packages:
 ///   platforms/android-36     2.0.0   Android SDK Platform 36
 /// ```
-fn parse_platforms(output: &str) -> Vec<Platform> {
+fn parse_listed_packages(output: &str) -> Vec<ListedPackage> {
     let mut seen = HashSet::new();
     let mut installed = None;
-    let mut platforms: Vec<Platform> = output
+    output
         .lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -257,18 +288,36 @@ fn parse_platforms(output: &str) -> Vec<Platform> {
 
             let mut parts = line.split_whitespace();
             let package = parts.next()?;
-            let api_level = package.strip_prefix("platforms/android-")?;
             if !seen.insert(package.to_string()) {
                 return None;
             }
             let version = parts.next().unwrap_or_default().to_string();
             let description = parts.collect::<Vec<_>>().join(" ");
-            Some(Platform {
+            Some(ListedPackage {
                 package: package.to_string(),
-                api_level: api_level.to_string(),
                 version,
                 description,
                 installed: installed.unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// Extract platform rows from a full `android sdk list --all` dump.
+fn parse_platforms(output: &str) -> Vec<Platform> {
+    let mut platforms: Vec<Platform> = parse_listed_packages(output)
+        .into_iter()
+        .filter_map(|listed| {
+            let api_level = listed
+                .package
+                .strip_prefix("platforms/android-")?
+                .to_string();
+            Some(Platform {
+                package: listed.package,
+                api_level,
+                version: listed.version,
+                description: listed.description,
+                installed: listed.installed,
             })
         })
         .collect();
@@ -281,6 +330,40 @@ fn parse_platforms(output: &str) -> Vec<Platform> {
             .then_with(|| sort_key(&b.api_level).cmp(&sort_key(&a.api_level)))
     });
     platforms
+}
+
+/// Extract build-tools rows from a full `android sdk list --all` dump.
+fn parse_build_tools(output: &str) -> Vec<BuildTool> {
+    let mut build_tools: Vec<BuildTool> = parse_listed_packages(output)
+        .into_iter()
+        .filter(|listed| listed.package.starts_with("build-tools/"))
+        .map(|listed| BuildTool {
+            package: listed.package,
+            version: listed.version,
+            description: listed.description,
+            installed: listed.installed,
+        })
+        .collect();
+
+    // Installed first, then newest version (`36.0.0` after `9.0.0`).
+    build_tools.sort_by_cached_key(|tool| {
+        (
+            !tool.installed,
+            std::cmp::Reverse(version_key(&tool.version)),
+        )
+    });
+    build_tools
+}
+
+/// Sortable version key: numeric release components, then stable before
+/// previews, then the preview suffix (`rc2` after `rc1`).
+fn version_key(version: &str) -> (Vec<u64>, bool, String) {
+    let (base, suffix) = version.split_once('-').unwrap_or((version, ""));
+    let numbers = base
+        .split('.')
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    (numbers, suffix.is_empty(), suffix.to_string())
 }
 
 fn sort_key(api_level: &str) -> (u32, String) {
@@ -386,6 +469,57 @@ pub fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_and_sorts_build_tools() {
+        let output = "\
+Installed packages:
+  build-tools/36.0.0   36.0.0   Android SDK Build-Tools 36
+  build-tools/9.0.0    9.0.0    Android SDK Build-Tools 9
+Available packages:
+  build-tools/34.0.0   34.0.0   Android SDK Build-Tools 34
+  build-tools/36.0.0   36.0.0   Android SDK Build-Tools 36
+";
+        let tools = parse_build_tools(output);
+
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0].package, "build-tools/36.0.0");
+        assert!(tools[0].installed);
+        assert_eq!(tools[1].package, "build-tools/9.0.0");
+        assert!(tools[1].installed);
+        assert_eq!(tools[2].package, "build-tools/34.0.0");
+        assert!(!tools[2].installed);
+    }
+
+    #[test]
+    fn stable_build_tool_sorts_before_preview() {
+        let output = "\
+Available packages:
+  build-tools/36.1.0-rc1   36.1.0-rc1   Android SDK Build-Tools 36.1-rc1
+  build-tools/36.1.0       36.1.0       Android SDK Build-Tools 36.1
+  build-tools/36.1.0-rc2   36.1.0-rc2   Android SDK Build-Tools 36.1-rc2
+";
+        let tools = parse_build_tools(output);
+
+        assert_eq!(tools[0].package, "build-tools/36.1.0");
+        assert_eq!(tools[1].package, "build-tools/36.1.0-rc2");
+        assert_eq!(tools[2].package, "build-tools/36.1.0-rc1");
+    }
+
+    #[test]
+    fn matches_build_tool_fields() {
+        let tool = BuildTool {
+            package: "build-tools/36.0.0".into(),
+            version: "36.0.0".into(),
+            description: "Android SDK Build-Tools 36".into(),
+            installed: false,
+        };
+        assert!(tool.matches(""));
+        assert!(tool.matches("36"));
+        assert!(tool.matches("build-tools"));
+        assert!(tool.matches("36.0.0"));
+        assert!(!tool.matches("35"));
+    }
 
     #[test]
     fn parses_installed_and_available_platforms() {

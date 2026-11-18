@@ -14,12 +14,12 @@ use gpui_kit::{
     *,
 };
 
-use crate::android::{self, Platform, SdkSnapshot};
+use crate::android::{self, SdkSnapshot};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     SdkVersions,
-    SdkTools,
+    BuildTools,
     Devices,
     Emulators,
     Settings,
@@ -29,7 +29,7 @@ impl Page {
     fn title(self) -> &'static str {
         match self {
             Page::SdkVersions => "SDK Versions",
-            Page::SdkTools => "SDK Tools",
+            Page::BuildTools => "Build Tools",
             Page::Devices => "Devices",
             Page::Emulators => "Emulators",
             Page::Settings => "Settings",
@@ -41,7 +41,9 @@ impl Page {
             Page::SdkVersions => {
                 "Android SDK platforms — installed and available, read from the Android CLI."
             }
-            Page::SdkTools => "Build tools, platform tools, and emulator packages.",
+            Page::BuildTools => {
+                "Android SDK Build-Tools — installed and available, read from the Android CLI."
+            }
             Page::Devices => "Connected devices and emulators.",
             Page::Emulators => "Android Virtual Devices.",
             Page::Settings => "SDK root, Java, and CLI configuration.",
@@ -50,10 +52,7 @@ impl Page {
 
     fn body(self) -> &'static str {
         match self {
-            Page::SdkVersions => "",
-            Page::SdkTools => {
-                "Not implemented yet. Will list packages from `android sdk list` and install or remove them with `android sdk install|remove`."
-            }
+            Page::SdkVersions | Page::BuildTools => "",
             Page::Devices => {
                 "Not implemented yet. Will list connected devices from `android device` and `adb devices -l`."
             }
@@ -69,7 +68,7 @@ impl Page {
     fn icon(self) -> IconName {
         match self {
             Page::SdkVersions => IconName::HardDrive,
-            Page::SdkTools => IconName::SquareTerminal,
+            Page::BuildTools => IconName::SquareTerminal,
             Page::Devices => IconName::Cpu,
             Page::Emulators => IconName::LayoutDashboard,
             Page::Settings => IconName::Settings,
@@ -154,10 +153,19 @@ pub struct App {
     confirm_remove: Option<String>,
 }
 
+/// A normalized row shared by the platform and build-tools tables.
+struct PackageRow {
+    api_level: Option<String>,
+    package: String,
+    version: String,
+    description: String,
+    installed: bool,
+}
+
 impl App {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search SDK versions by API, package, or description")
+            InputState::new(window, cx).placeholder("Search by package, version, or description")
         });
         cx.subscribe(&search_input, |_, _, _: &InputEvent, cx| cx.notify())
             .detach();
@@ -264,7 +272,7 @@ impl App {
 
         let menu = SidebarMenu::new().children([
             item(Page::SdkVersions),
-            item(Page::SdkTools),
+            item(Page::BuildTools),
             item(Page::Devices),
             item(Page::Emulators),
             item(Page::Settings),
@@ -357,11 +365,106 @@ impl App {
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.page {
             Page::SdkVersions => self.render_sdk_versions(cx),
+            Page::BuildTools => self.render_build_tools(cx),
             page => Self::render_placeholder(page, cx),
         }
     }
 
     fn render_sdk_versions(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let (raw_query, query) = self.search_query(cx);
+        let platforms = &self.sdk.platforms;
+        let installed_count = platforms.iter().filter(|platform| platform.installed).count();
+        let available_count = platforms.len() - installed_count;
+        let mut summary = format!("{installed_count} installed · {available_count} available");
+        if !query.is_empty() {
+            let matching = platforms
+                .iter()
+                .filter(|platform| platform.matches(&query))
+                .count();
+            summary.push_str(&format!(" · {matching} matching"));
+        }
+
+        let rows: Vec<PackageRow> = platforms
+            .iter()
+            .filter(|platform| platform.matches(&query))
+            .map(|platform| PackageRow {
+                api_level: Some(platform.api_level.clone()),
+                package: platform.package.clone(),
+                version: platform.version.clone(),
+                description: platform.description.clone(),
+                installed: platform.installed,
+            })
+            .collect();
+
+        let (empty_title, empty_detail) = if query.is_empty() {
+            (
+                "No SDK platforms found".to_string(),
+                "`android sdk list --all` returned no platform packages.".to_string(),
+            )
+        } else {
+            (
+                format!("No SDK versions match “{raw_query}”"),
+                "Try an API level, package id, or description fragment.".to_string(),
+            )
+        };
+
+        self.render_package_page(rows, summary, empty_title, empty_detail, true, cx)
+    }
+
+    fn render_build_tools(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let (raw_query, query) = self.search_query(cx);
+        let build_tools = &self.sdk.build_tools;
+        let installed_count = build_tools.iter().filter(|tool| tool.installed).count();
+        let available_count = build_tools.len() - installed_count;
+        let mut summary = format!("{installed_count} installed · {available_count} available");
+        if !query.is_empty() {
+            let matching = build_tools.iter().filter(|tool| tool.matches(&query)).count();
+            summary.push_str(&format!(" · {matching} matching"));
+        }
+
+        let rows: Vec<PackageRow> = build_tools
+            .iter()
+            .filter(|tool| tool.matches(&query))
+            .map(|tool| PackageRow {
+                api_level: None,
+                package: tool.package.clone(),
+                version: tool.version.clone(),
+                description: tool.description.clone(),
+                installed: tool.installed,
+            })
+            .collect();
+
+        let (empty_title, empty_detail) = if query.is_empty() {
+            (
+                "No build-tools found".to_string(),
+                "`android sdk list --all` returned no build-tools packages.".to_string(),
+            )
+        } else {
+            (
+                format!("No build-tools match “{raw_query}”"),
+                "Try a version, package id, or description fragment.".to_string(),
+            )
+        };
+
+        self.render_package_page(rows, summary, empty_title, empty_detail, false, cx)
+    }
+
+    fn search_query(&self, cx: &mut Context<Self>) -> (String, String) {
+        let raw_query = self.search_input.read(cx).value().trim().to_string();
+        let query = raw_query.to_lowercase();
+        (raw_query, query)
+    }
+
+    /// Shared scaffold for the package list pages.
+    fn render_package_page(
+        &mut self,
+        rows: Vec<PackageRow>,
+        summary: String,
+        empty_title: String,
+        empty_detail: String,
+        show_api: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if self.sdk.cli.is_none() {
             return self.render_cli_missing(cx);
         }
@@ -377,7 +480,14 @@ impl App {
             content = content.child(Self::render_error(error, cx));
         }
 
-        content = content.child(self.render_platform_table(cx));
+        content = content.child(self.render_package_table(
+            rows,
+            summary,
+            empty_title,
+            empty_detail,
+            show_api,
+            cx,
+        ));
         content
             .child(
                 div().px_6().pb_6().child(
@@ -525,25 +635,60 @@ impl App {
         )
     }
 
-    fn render_platform_table(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let raw_query = self.search_input.read(cx).value().trim().to_string();
-        let query = raw_query.to_lowercase();
-        let platforms: Vec<Platform> = self
-            .sdk
-            .platforms
-            .iter()
-            .filter(|platform| platform.matches(&query))
-            .cloned()
-            .collect();
-
+    fn render_package_table(
+        &mut self,
+        rows: Vec<PackageRow>,
+        summary: String,
+        empty_title: String,
+        empty_detail: String,
+        show_api: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
-        let installed_count = self.sdk.platforms.iter().filter(|p| p.installed).count();
-        let available_count = self.sdk.platforms.len() - installed_count;
-        let mut summary = format!("{installed_count} installed · {available_count} available");
-        if !query.is_empty() {
-            summary.push_str(&format!(" · {} matching", platforms.len()));
+
+        let mut header = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_6()
+            .py_2()
+            .border_b_1()
+            .border_color(border);
+        if show_api {
+            header = header.child(
+                Label::new("API")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(70.)),
+            );
         }
+        header = header
+            .child(
+                Label::new("PACKAGE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .flex_1(),
+            )
+            .child(
+                Label::new("VERSION")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(70.)),
+            )
+            .child(
+                Label::new("DESCRIPTION")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(200.)),
+            )
+            .child(
+                Label::new("STATE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(80.)),
+            )
+            .child(div().w(px(160.)));
 
         let mut table = div()
             .flex()
@@ -556,61 +701,9 @@ impl App {
                         .text_color(muted),
                 ),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_4()
-                    .px_6()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(
-                        Label::new("API")
-                            .text_size(px(10.))
-                            .text_color(muted)
-                            .w(px(70.)),
-                    )
-                    .child(
-                        Label::new("PACKAGE")
-                            .text_size(px(10.))
-                            .text_color(muted)
-                            .flex_1(),
-                    )
-                    .child(
-                        Label::new("VERSION")
-                            .text_size(px(10.))
-                            .text_color(muted)
-                            .w(px(70.)),
-                    )
-                    .child(
-                        Label::new("DESCRIPTION")
-                            .text_size(px(10.))
-                            .text_color(muted)
-                            .w(px(200.)),
-                    )
-                    .child(
-                        Label::new("STATE")
-                            .text_size(px(10.))
-                            .text_color(muted)
-                            .w(px(80.)),
-                    )
-                    .child(div().w(px(160.))),
-            );
+            .child(header);
 
-        if platforms.is_empty() {
-            let (title, detail) = if query.is_empty() {
-                (
-                    "No SDK platforms found".to_string(),
-                    "`android sdk list --all platforms*` returned no platform packages.".to_string(),
-                )
-            } else {
-                (
-                    format!("No SDK versions match “{raw_query}”"),
-                    "Try an API level, package id, or description fragment.".to_string(),
-                )
-            };
-
+        if rows.is_empty() {
             table = table.child(
                 div()
                     .flex()
@@ -619,37 +712,103 @@ impl App {
                     .px_6()
                     .py_8()
                     .child(
-                        Label::new(title)
+                        Label::new(empty_title)
                             .text_size(px(14.))
                             .font_weight(FontWeight::SEMIBOLD),
                     )
                     .child(
-                        Label::new(detail)
+                        Label::new(empty_detail)
                             .text_size(px(12.))
                             .text_color(muted),
                     ),
             );
         } else {
-            for (ix, platform) in platforms.iter().enumerate() {
-                table = table.child(self.render_platform_row(platform, ix, cx));
+            for (ix, row) in rows.iter().enumerate() {
+                table = table.child(self.render_package_row(row, ix, show_api, cx));
             }
         }
 
         table
     }
 
-    fn render_platform_row(
+    fn render_package_row(
         &self,
-        platform: &Platform,
+        row: &PackageRow,
         ix: usize,
+        show_api: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
-        let confirming = self.confirm_remove.as_deref() == Some(platform.package.as_str());
-        let disabled = self.busy || self.sdk.cli.is_none();
-        let package = platform.package.clone();
+        let (state, state_color) = if row.installed {
+            ("Installed", cx.theme().success)
+        } else {
+            ("Available", muted)
+        };
 
+        let mut element = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_6()
+            .py_2()
+            .border_b_1()
+            .border_color(border);
+
+        if show_api {
+            element = element.child(
+                Label::new(row.api_level.clone().unwrap_or_default())
+                    .id(("api", ix))
+                    .text_size(px(13.))
+                    .w(px(70.)),
+            );
+        }
+
+        element
+            .child(
+                div().flex_1().min_w(px(0.)).child(
+                    Label::new(row.package.clone())
+                        .id(("package", ix))
+                        .text_size(px(12.))
+                        .truncate(),
+                ),
+            )
+            .child(
+                Label::new(row.version.clone())
+                    .id(("version", ix))
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .w(px(70.)),
+            )
+            .child(
+                div().w(px(200.)).min_w(px(0.)).child(
+                    Label::new(row.description.clone())
+                        .id(("description", ix))
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .truncate(),
+                ),
+            )
+            .child(
+                Label::new(state)
+                    .id(("state", ix))
+                    .text_size(px(12.))
+                    .text_color(state_color)
+                    .w(px(80.)),
+            )
+            .child(self.render_row_actions(&row.package, row.installed, ix, cx))
+    }
+
+    fn render_row_actions(
+        &self,
+        package: &str,
+        installed: bool,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let confirming = self.confirm_remove.as_deref() == Some(package);
+        let disabled = self.busy || self.sdk.cli.is_none();
+        let package = package.to_string();
         let mut actions = div().flex().items_center().gap_2().w(px(160.));
 
         if confirming {
@@ -674,9 +833,9 @@ impl App {
                             cx.notify();
                         })),
                 );
-        } else if platform.installed {
-            let update_package = platform.package.clone();
-            let remove_package = platform.package.clone();
+        } else if installed {
+            let update_package = package.clone();
+            let remove_package = package.clone();
             actions = actions
                 .child(
                     Button::new(("update", ix))
@@ -700,7 +859,7 @@ impl App {
                         })),
                 );
         } else {
-            let install_package = platform.package.clone();
+            let install_package = package.clone();
             actions = actions.child(
                 Button::new(("install-row", ix))
                     .primary()
@@ -713,58 +872,7 @@ impl App {
             );
         }
 
-        let (state, state_color) = if platform.installed {
-            ("Installed", cx.theme().success)
-        } else {
-            ("Available", muted)
-        };
-
-        div()
-            .flex()
-            .items_center()
-            .gap_4()
-            .px_6()
-            .py_2()
-            .border_b_1()
-            .border_color(border)
-            .child(
-                Label::new(platform.api_level.clone())
-                    .id(("api", ix))
-                    .text_size(px(13.))
-                    .w(px(70.)),
-            )
-            .child(
-                div().flex_1().min_w(px(0.)).child(
-                    Label::new(platform.package.clone())
-                        .id(("package", ix))
-                        .text_size(px(12.))
-                        .truncate(),
-                ),
-            )
-            .child(
-                Label::new(platform.version.clone())
-                    .id(("version", ix))
-                    .text_size(px(12.))
-                    .text_color(muted)
-                    .w(px(70.)),
-            )
-            .child(
-                div().w(px(200.)).min_w(px(0.)).child(
-                    Label::new(platform.description.clone())
-                        .id(("description", ix))
-                        .text_size(px(12.))
-                        .text_color(muted)
-                        .truncate(),
-                ),
-            )
-            .child(
-                Label::new(state)
-                    .id(("state", ix))
-                    .text_size(px(12.))
-                    .text_color(state_color)
-                    .w(px(80.)),
-            )
-            .child(actions)
+        actions
     }
 
     fn render_placeholder(page: Page, cx: &mut Context<Self>) -> AnyElement {
