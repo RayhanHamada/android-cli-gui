@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 gpui-kit = "0.10.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Keep app code in Debug while the UI stack stays fast at runtime.
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
