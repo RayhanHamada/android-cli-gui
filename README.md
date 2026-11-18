@@ -24,6 +24,15 @@ other Mac app.
 Homebrew 7 requires trusting third-party casks before installation. On older
 Homebrew versions the `brew trust` step can be skipped.
 
+### Gatekeeper
+
+Release builds are ad-hoc signed, not notarized. Homebrew 7 quarantines
+downloads, so macOS blocks the first launch. Approve the app once in
+**System Settings → Privacy & Security → Open Anyway**.
+
+Removing that prompt requires Apple Developer ID signing and notarization in
+the release workflow.
+
 If you installed the old formula, remove it before switching:
 
 ```sh
