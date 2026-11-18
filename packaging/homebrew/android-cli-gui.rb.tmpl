@@ -2,7 +2,7 @@ class AndroidCliGui < Formula
   desc "Unofficial GUI for the official Android CLI"
   homepage "https://github.com/RayhanHamada/android-cli-gui"
   version "__VERSION__"
-  depends_on macos: ">= :sequoia"
+  depends_on macos: :sequoia
 
   on_macos do
     if Hardware::CPU.arm?
