@@ -78,6 +78,8 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: windows-x86_64
     runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
     steps:
       - uses: actions/checkout@v7
       - name: Install Linux dependencies
