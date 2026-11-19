@@ -8,8 +8,11 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         input::{Input, InputEvent, InputState},
         label::Label,
+        progress::Progress,
         scroll::ScrollableElement,
         sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
+        skeleton::Skeleton,
+        spinner::Spinner,
     },
     *,
 };
@@ -71,6 +74,17 @@ impl Page {
             Page::Settings => IconName::Settings,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum FetchKind {
+    Snapshot,
+    Devices,
+}
+
+enum FetchResult {
+    Snapshot(SdkSnapshot),
+    Devices(android::DeviceSnapshot),
 }
 
 enum Mutation {
@@ -156,6 +170,12 @@ pub struct App {
     status: Option<Status>,
     busy: bool,
     confirm_remove: Option<String>,
+    /// A background fetch is in flight. Cached data stays visible meanwhile.
+    loading: bool,
+    /// False only until the first fetch completes; drives the initial skeleton.
+    has_loaded: bool,
+    loading_detail: String,
+    fetch_id: u64,
 }
 
 /// A normalized row shared by the platform and build-tools tables.
@@ -237,25 +257,118 @@ impl App {
         })
         .detach();
 
-        Self {
+        let mut app = Self {
             page: Page::SdkVersions,
-            sdk: android::snapshot(),
+            sdk: SdkSnapshot::default(),
             search_input,
             running,
             status: None,
             busy: false,
             confirm_remove: None,
-        }
+            loading: false,
+            has_loaded: false,
+            loading_detail: String::new(),
+            fetch_id: 0,
+        };
+        app.start_fetch(
+            FetchKind::Snapshot,
+            "Reading SDK packages, emulators, and connected devices",
+            None,
+            cx,
+        );
+        app
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.sdk = android::snapshot();
+        if self.busy || self.loading {
+            return;
+        }
         self.confirm_remove = None;
+        self.status = None;
+        self.start_fetch(
+            FetchKind::Snapshot,
+            "Refreshing SDK packages and devices",
+            Some(Status::success("Up to date.")),
+            cx,
+        );
+    }
+
+    fn refresh_devices(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.loading || self.sdk.cli.is_none() {
+            return;
+        }
+        self.start_fetch(
+            FetchKind::Devices,
+            "Checking emulators and connected devices",
+            None,
+            cx,
+        );
+    }
+
+    /// Move the CLI work off the UI thread. The window stays interactive while
+    /// the fetch runs; callers decide whether cached data remains visible.
+    fn start_fetch(
+        &mut self,
+        kind: FetchKind,
+        detail: &str,
+        success: Option<Status>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading {
+            return;
+        }
+        self.fetch_id = self.fetch_id.wrapping_add(1);
+        let fetch_id = self.fetch_id;
+        self.loading = true;
+        self.loading_detail = detail.to_string();
+        self.status = None;
         cx.notify();
+
+        let running = self.running.clone();
+        let cli = self.sdk.cli.clone();
+        let root = self.sdk.root.clone();
+        let task = cx.background_spawn(async move {
+            match kind {
+                FetchKind::Snapshot => FetchResult::Snapshot(android::snapshot(&running)),
+                FetchKind::Devices => FetchResult::Devices(android::DeviceSnapshot::fetch(
+                    cli.as_deref(),
+                    root.as_deref(),
+                    &running,
+                )),
+            }
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.fetch_id != fetch_id {
+                    return;
+                }
+                let had_error = match &result {
+                    FetchResult::Snapshot(snapshot) => {
+                        snapshot.error.is_some() || snapshot.devices_error.is_some()
+                    }
+                    FetchResult::Devices(devices) => devices.devices_error.is_some(),
+                };
+                match result {
+                    FetchResult::Snapshot(snapshot) => this.sdk = snapshot,
+                    FetchResult::Devices(devices) => this.sdk.apply_devices(devices),
+                }
+                this.loading = false;
+                this.has_loaded = true;
+                if let Some(status) = success
+                    && !had_error
+                {
+                    this.status = Some(status);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn start_mutation(&mut self, mutation: Mutation, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy || self.loading {
             return;
         }
         let Some(cli) = self.sdk.cli.clone() else {
@@ -298,12 +411,20 @@ impl App {
             let outcome = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
-                this.sdk = android::snapshot();
-                this.status = Some(match outcome {
-                    Ok(_) => Status::success(format!("{verb} {target}.")),
-                    Err(err) => Status::error(err),
-                });
-                cx.notify();
+                match outcome {
+                    Ok(_) => {
+                        this.start_fetch(
+                            FetchKind::Snapshot,
+                            "Refreshing SDK packages and devices",
+                            Some(Status::success(format!("{verb} {target}."))),
+                            cx,
+                        );
+                    }
+                    Err(err) => {
+                        this.status = Some(Status::error(err));
+                        cx.notify();
+                    }
+                }
             });
         })
         .detach();
@@ -324,7 +445,7 @@ impl App {
                             this.page = page;
                             this.confirm_remove = None;
                             if page == Page::Devices {
-                                this.sdk.refresh_devices();
+                                this.refresh_devices(cx);
                             }
                             cx.notify();
                         }
@@ -372,8 +493,9 @@ impl App {
     fn render_main(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
+        let initial_loading = self.loading && !self.has_loaded;
 
-        div()
+        let mut main = div()
             .flex()
             .flex_col()
             .flex_1()
@@ -409,20 +531,202 @@ impl App {
                     .child(
                         Button::new("refresh")
                             .outline()
-                            .label("Refresh")
+                            .label(if self.loading {
+                                if self.has_loaded {
+                                    "Refreshing…"
+                                } else {
+                                    "Loading…"
+                                }
+                            } else {
+                                "Refresh"
+                            })
                             .icon(IconName::RefreshCw)
+                            .loading(self.loading)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
+            );
+
+        // Subsequent fetches keep the last snapshot on screen and add a quiet
+        // progress strip; only the first fetch replaces the page with skeletons.
+        if self.loading && self.has_loaded {
+            main = main.child(self.render_sync_banner(cx));
+        }
+
+        main.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .overflow_y_scrollbar()
+                .child(if initial_loading {
+                    self.render_initial_loading(cx)
+                } else {
+                    self.render_page(cx)
+                }),
+        )
+    }
+
+    fn render_sync_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let primary = cx.theme().primary;
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_6()
+            .py_3()
+            .border_b_1()
+            .border_color(border)
+            .bg(cx.theme().secondary.opacity(0.35))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(Spinner::new().small().color(primary))
+                    .child(
+                        Label::new("Fetching Android data")
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        Label::new(self.loading_detail.clone())
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .flex_1(),
+                    )
+                    .child(
+                        Label::new("You can keep browsing")
+                            .text_size(px(10.))
+                            .text_color(muted),
+                    ),
+            )
+            .child(
+                Progress::new("sync-progress")
+                    .loading(true)
+                    .xsmall()
+                    .color(primary)
+                    .accessibility_label("Fetching Android data"),
+            )
+    }
+
+    fn render_initial_loading(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let primary = cx.theme().primary;
+        // Every Skeleton's animation uses the same local id. Wrap each one in a
+        // uniquely identified div so debug accessibility checks do not see
+        // duplicate node ids across siblings.
+        let skeleton = |id: usize, width: Option<Pixels>, height: Pixels| {
+            let wrapper = div().id(("skeleton", id));
+            let wrapper = match width {
+                Some(width) => wrapper.w(width),
+                None => wrapper.flex_1(),
+            };
+            wrapper.child(Skeleton::new().h(height).rounded(px(4.)))
+        };
+
+        let mut rows = div().flex().flex_col();
+        for ix in 0..7 {
+            let id = ix * 8;
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .px_6()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(skeleton(id, Some(px(48.)), px(10.)))
+                    .child(skeleton(id + 1, None, px(10.)))
+                    .child(skeleton(id + 2, Some(px(54.)), px(10.)))
+                    .child(skeleton(id + 3, Some(px(180.)), px(10.)))
+                    .child(skeleton(id + 4, Some(px(64.)), px(10.)))
+                    .child(
+                        div()
+                            .id(("skeleton-button", ix))
+                            .w(px(70.))
+                            .child(Skeleton::new().h(px(24.)).rounded(px(6.))),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_4()
+                    .px_6()
+                    .pt_8()
+                    .pb_5()
+                    .max_w(px(720.))
+                    .child(Spinner::new().large().color(primary))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                Label::new("Reading your Android setup")
+                                    .text_size(px(18.))
+                                    .font_weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                Label::new(
+                                    "The Android CLI is gathering SDK platforms, build tools, \
+                                     emulators, and connected devices. This usually takes a few \
+                                     seconds, and the window stays responsive.",
+                                )
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .whitespace_normal(),
+                            ),
+                    ),
+            )
+            .child(
+                div().px_6().pb_5().child(
+                    Progress::new("initial-progress")
+                        .loading(true)
+                        .small()
+                        .color(primary)
+                        .accessibility_label("Loading Android SDK data"),
+                ),
             )
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_y_scrollbar()
-                    .child(self.render_page(cx)),
+                    .items_center()
+                    .gap_4()
+                    .px_6()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(skeleton(1000, Some(px(56.)), px(8.)))
+                    .child(skeleton(1001, None, px(8.)))
+                    .child(skeleton(1002, Some(px(48.)), px(8.)))
+                    .child(skeleton(1003, Some(px(140.)), px(8.)))
+                    .child(skeleton(1004, Some(px(54.)), px(8.)))
+                    .child(div().w(px(70.))),
             )
+            .child(rows)
+            .child(
+                div().px_6().py_4().child(
+                    Label::new("You can switch pages while this finishes.")
+                        .text_size(px(11.))
+                        .text_color(muted),
+                ),
+            )
+            .into_any_element()
     }
 
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -783,7 +1087,7 @@ impl App {
         let Some(action) = action else {
             return cell;
         };
-        let disabled = self.busy || self.sdk.cli.is_none();
+        let disabled = self.busy || self.loading || self.sdk.cli.is_none();
 
         match action {
             DeviceAction::Start(device) => {
@@ -904,8 +1208,14 @@ impl App {
                 div().pt_2().child(
                     Button::new("check-cli")
                         .primary()
-                        .label("Check again")
+                        .label(if self.loading {
+                            "Checking…"
+                        } else {
+                            "Check again"
+                        })
                         .icon(IconName::RefreshCw)
+                        .loading(self.loading)
+                        .disabled(self.busy)
                         .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                 ),
             )
@@ -915,6 +1225,7 @@ impl App {
     fn render_cli_info(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let border = cx.theme().border;
+        let initial_loading = self.loading && !self.has_loaded;
 
         let detail = |label: &'static str, value: String| {
             div()
@@ -925,6 +1236,25 @@ impl App {
                 .child(Label::new(value).text_size(px(12.)))
         };
 
+        let cli_value = if initial_loading {
+            "Checking…".to_string()
+        } else {
+            match (&self.sdk.cli, &self.sdk.cli_version) {
+                (Some(_), Some(version)) => version.clone(),
+                (Some(path), None) => path.display().to_string(),
+                (None, _) => "Not found on PATH".to_string(),
+            }
+        };
+        let sdk_value = if initial_loading {
+            "Resolving…".to_string()
+        } else {
+            self.sdk
+                .root
+                .as_ref()
+                .map(|root| root.display().to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        };
+
         div()
             .flex()
             .items_start()
@@ -933,22 +1263,8 @@ impl App {
             .py_4()
             .border_b_1()
             .border_color(border)
-            .child(detail(
-                "ANDROID CLI",
-                match (&self.sdk.cli, &self.sdk.cli_version) {
-                    (Some(_), Some(version)) => version.clone(),
-                    (Some(path), None) => path.display().to_string(),
-                    (None, _) => "Not found on PATH".to_string(),
-                },
-            ))
-            .child(detail(
-                "SDK",
-                self.sdk
-                    .root
-                    .as_ref()
-                    .map(|root| root.display().to_string())
-                    .unwrap_or_else(|| "Unknown".to_string()),
-            ))
+            .child(detail("ANDROID CLI", cli_value))
+            .child(detail("SDK", sdk_value))
     }
 
     fn render_search_bar(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -1158,7 +1474,7 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let confirming = self.confirm_remove.as_deref() == Some(package);
-        let disabled = self.busy || self.sdk.cli.is_none();
+        let disabled = self.busy || self.loading || self.sdk.cli.is_none();
         let package = package.to_string();
         let mut actions = div().flex().items_center().gap_2().w(px(160.));
 

@@ -7,7 +7,7 @@
 use std::{
     collections::HashSet,
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex, MutexGuard},
     thread,
@@ -119,6 +119,51 @@ pub struct SdkSnapshot {
     /// Non-fatal CLI, adb, or parse failure.
     pub error: Option<String>,
     pub devices_error: Option<String>,
+}
+
+/// Device and emulator state, fetched independently of the SDK package catalog.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceSnapshot {
+    pub adb: Option<PathBuf>,
+    pub devices: Vec<Device>,
+    pub emulators: Vec<Emulator>,
+    pub devices_error: Option<String>,
+}
+
+impl DeviceSnapshot {
+    /// Fetch configured AVDs and attached devices. Call from a background task;
+    /// both commands can take seconds while `adb` starts or devices enumerate.
+    pub fn fetch(cli: Option<&Path>, root: Option<&Path>, running: &RunningCli) -> Self {
+        let mut snapshot = Self::default();
+        let mut errors = Vec::new();
+
+        if let Some(cli) = cli {
+            match run(cli, root, &["emulator", "list", "--long"], running) {
+                Ok(output) => snapshot.emulators = parse_emulators(&output),
+                Err(err) => errors.push(err),
+            }
+        }
+
+        let Some(adb) = find_adb(root) else {
+            errors.push(format!(
+                "`{}` was not found. Install Android SDK Platform-Tools with `android sdk install platform-tools`.",
+                adb_binary_name()
+            ));
+            snapshot.devices_error = Some(errors.join(" "));
+            return snapshot;
+        };
+
+        snapshot.adb = Some(adb.clone());
+        match run(&adb, None, &["devices", "-l"], running) {
+            Ok(output) => snapshot.devices = parse_devices(&output),
+            Err(err) => errors.push(err),
+        }
+
+        if !errors.is_empty() {
+            snapshot.devices_error = Some(errors.join(" "));
+        }
+        snapshot
+    }
 }
 
 /// Tracks the running `android` child so shutdown can stop it cleanly.
@@ -306,46 +351,12 @@ fn find_adb(root: Option<&std::path::Path>) -> Option<PathBuf> {
 }
 
 impl SdkSnapshot {
-    /// Refresh configured AVDs and attached devices from the official tooling.
-    pub fn refresh_devices(&mut self) {
-        self.adb = None;
-        self.devices.clear();
-        self.emulators.clear();
-        self.devices_error = None;
-        let mut errors = Vec::new();
-
-        if let Some(cli) = self.cli.clone() {
-            let running = RunningCli::default();
-            match run(
-                &cli,
-                self.root.as_deref(),
-                &["emulator", "list", "--long"],
-                &running,
-            ) {
-                Ok(output) => self.emulators = parse_emulators(&output),
-                Err(err) => errors.push(err),
-            }
-        }
-
-        let Some(adb) = find_adb(self.root.as_deref()) else {
-            errors.push(format!(
-                "`{}` was not found. Install Android SDK Platform-Tools with `android sdk install platform-tools`.",
-                adb_binary_name()
-            ));
-            self.devices_error = Some(errors.join(" "));
-            return;
-        };
-
-        self.adb = Some(adb.clone());
-        let running = RunningCli::default();
-        match run(&adb, None, &["devices", "-l"], &running) {
-            Ok(output) => self.devices = parse_devices(&output),
-            Err(err) => errors.push(err),
-        }
-
-        if !errors.is_empty() {
-            self.devices_error = Some(errors.join(" "));
-        }
+    /// Replace the device half of the snapshot without touching package state.
+    pub fn apply_devices(&mut self, devices: DeviceSnapshot) {
+        self.adb = devices.adb;
+        self.devices = devices.devices;
+        self.emulators = devices.emulators;
+        self.devices_error = devices.devices_error;
     }
 }
 
@@ -472,7 +483,7 @@ fn parse_emulators(output: &str) -> Vec<Emulator> {
         .collect()
 }
 
-pub fn snapshot() -> SdkSnapshot {
+pub fn snapshot(running: &RunningCli) -> SdkSnapshot {
     let Some(cli) = find_cli() else {
         return SdkSnapshot {
             error: Some(format!(
@@ -483,8 +494,7 @@ pub fn snapshot() -> SdkSnapshot {
         };
     };
 
-    let running = RunningCli::default();
-    let (root, cli_version, info_error) = match run(&cli, None, &["info"], &running) {
+    let (root, cli_version, info_error) = match run(&cli, None, &["info"], running) {
         Ok(output) => {
             let (root, version) = parse_info(&output);
             (root, version, None)
@@ -499,14 +509,14 @@ pub fn snapshot() -> SdkSnapshot {
         ..SdkSnapshot::default()
     };
 
-    match run(&cli, root.as_deref(), &["sdk", "list", "--all"], &running) {
+    match run(&cli, root.as_deref(), &["sdk", "list", "--all"], running) {
         Ok(output) => {
             snapshot.platforms = parse_platforms(&output);
             snapshot.build_tools = parse_build_tools(&output);
         }
         Err(err) => snapshot.error = Some(err),
     }
-    snapshot.refresh_devices();
+    snapshot.apply_devices(DeviceSnapshot::fetch(Some(&cli), root.as_deref(), running));
     snapshot
 }
 
