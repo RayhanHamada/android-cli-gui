@@ -757,6 +757,24 @@ pub fn remove(
     run(cli, root, &["sdk", "remove", package], running)
 }
 
+pub fn start_emulator(
+    cli: &std::path::Path,
+    root: Option<&std::path::Path>,
+    device: &str,
+    running: &RunningCli,
+) -> Result<String, String> {
+    run(cli, root, &["emulator", "start", device], running)
+}
+
+pub fn stop_emulator(
+    cli: &std::path::Path,
+    root: Option<&std::path::Path>,
+    device: &str,
+    running: &RunningCli,
+) -> Result<String, String> {
+    run(cli, root, &["emulator", "stop", device], running)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

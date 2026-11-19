@@ -77,14 +77,18 @@ enum Mutation {
     Install(String),
     Update(String),
     Remove(String),
+    StartEmulator(String),
+    StopEmulator(String),
 }
 
 impl Mutation {
-    fn package(&self) -> &str {
+    fn target(&self) -> &str {
         match self {
-            Mutation::Install(package) | Mutation::Update(package) | Mutation::Remove(package) => {
-                package
-            }
+            Mutation::Install(target)
+            | Mutation::Update(target)
+            | Mutation::Remove(target)
+            | Mutation::StartEmulator(target)
+            | Mutation::StopEmulator(target) => target,
         }
     }
 
@@ -93,6 +97,8 @@ impl Mutation {
             Mutation::Install(_) => "Installed",
             Mutation::Update(_) => "Updated",
             Mutation::Remove(_) => "Removed",
+            Mutation::StartEmulator(_) => "Started",
+            Mutation::StopEmulator(_) => "Stopped",
         }
     }
 
@@ -101,6 +107,8 @@ impl Mutation {
             Mutation::Install(_) => "Installing",
             Mutation::Update(_) => "Updating",
             Mutation::Remove(_) => "Removing",
+            Mutation::StartEmulator(_) => "Starting",
+            Mutation::StopEmulator(_) => "Stopping",
         }
     }
 }
@@ -167,6 +175,12 @@ struct DeviceRow {
     details: String,
     online: bool,
     state_is_error: bool,
+    action: Option<DeviceAction>,
+}
+
+enum DeviceAction {
+    Start(String),
+    Stop(String),
 }
 
 fn device_state_label(state: &str) -> String {
@@ -252,8 +266,8 @@ impl App {
 
         let root = self.sdk.root.clone();
         let cli_process = self.running.clone();
-        let package = mutation.package().to_string();
-        let running = format!("{} {package}…", mutation.gerund());
+        let target = mutation.target().to_string();
+        let running = format!("{} {target}…", mutation.gerund());
         let verb = mutation.verb();
         self.busy = true;
         self.confirm_remove = None;
@@ -271,6 +285,12 @@ impl App {
                 Mutation::Remove(package) => {
                     android::remove(&cli, root.as_deref(), &package, &cli_process)
                 }
+                Mutation::StartEmulator(device) => {
+                    android::start_emulator(&cli, root.as_deref(), &device, &cli_process)
+                }
+                Mutation::StopEmulator(device) => {
+                    android::stop_emulator(&cli, root.as_deref(), &device, &cli_process)
+                }
             }
         });
 
@@ -280,7 +300,7 @@ impl App {
                 this.busy = false;
                 this.sdk = android::snapshot();
                 this.status = Some(match outcome {
-                    Ok(_) => Status::success(format!("{verb} {package}.")),
+                    Ok(_) => Status::success(format!("{verb} {target}.")),
                     Err(err) => Status::error(err),
                 });
                 cx.notify();
@@ -544,8 +564,9 @@ impl App {
                 Label::new("DETAILS")
                     .text_size(px(10.))
                     .text_color(muted)
-                    .flex_1(),
-            );
+                    .w(px(300.)),
+            )
+            .child(div().w(px(90.)));
 
         let mut content = div().flex().flex_col().w_full().child(
             div()
@@ -556,6 +577,9 @@ impl App {
 
         if let Some(error) = &self.sdk.devices_error {
             content = content.child(Self::render_error(error, cx));
+        }
+        if let Some(status) = &self.status {
+            content = content.child(self.render_status(status, cx));
         }
         content = content.child(header);
 
@@ -661,6 +685,11 @@ impl App {
                 details: details.join(" · "),
                 online,
                 state_is_error,
+                action: Some(if online {
+                    DeviceAction::Stop(emulator.id.clone())
+                } else {
+                    DeviceAction::Start(emulator.id.clone())
+                }),
             });
         }
 
@@ -679,6 +708,7 @@ impl App {
                 details: adb_device_details(device),
                 online: device.is_online(),
                 state_is_error: device.state == "unauthorized" || device.state == "offline",
+                action: None,
             });
         }
 
@@ -732,7 +762,7 @@ impl App {
                     .w(px(110.)),
             )
             .child(
-                div().flex_1().min_w(px(0.)).child(
+                div().w(px(300.)).min_w(px(0.)).child(
                     Label::new(row.details.clone())
                         .id(("device-details", ix))
                         .text_size(px(12.))
@@ -740,6 +770,49 @@ impl App {
                         .truncate(),
                 ),
             )
+            .child(self.render_device_action(row.action.as_ref(), ix, cx))
+    }
+
+    fn render_device_action(
+        &self,
+        action: Option<&DeviceAction>,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let cell = div().flex().items_center().w(px(90.));
+        let Some(action) = action else {
+            return cell;
+        };
+        let disabled = self.busy || self.sdk.cli.is_none();
+
+        match action {
+            DeviceAction::Start(device) => {
+                let device = device.clone();
+                cell.child(
+                    Button::new(("start-emulator", ix))
+                        .primary()
+                        .small()
+                        .label("Start")
+                        .disabled(disabled)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_mutation(Mutation::StartEmulator(device.clone()), cx);
+                        })),
+                )
+            }
+            DeviceAction::Stop(device) => {
+                let device = device.clone();
+                cell.child(
+                    Button::new(("stop-emulator", ix))
+                        .ghost()
+                        .small()
+                        .label("Stop")
+                        .disabled(disabled)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_mutation(Mutation::StopEmulator(device.clone()), cx);
+                        })),
+                )
+            }
+        }
     }
 
     fn search_query(&self, cx: &mut Context<Self>) -> (String, String) {
