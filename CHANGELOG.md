@@ -1,3 +1,9 @@
+## 0.1.4 (2026-11-19)
+
+### Features
+
+- publish macOS DMG installers (#10)
+
 ## 0.1.3 (2026-11-18)
 
 ### Features
