@@ -1,6 +1,6 @@
 //! Application shell and the SDK Versions screen.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use gpui_kit::{
     component::{
@@ -44,7 +44,7 @@ impl Page {
             Page::BuildTools => {
                 "Android SDK Build-Tools — installed and available, read from the Android CLI."
             }
-            Page::Devices => "Connected devices and emulators.",
+            Page::Devices => "Devices connected through adb, including running emulators.",
             Page::Emulators => "Android Virtual Devices.",
             Page::Settings => "SDK root, Java, and CLI configuration.",
         }
@@ -52,10 +52,7 @@ impl Page {
 
     fn body(self) -> &'static str {
         match self {
-            Page::SdkVersions | Page::BuildTools => "",
-            Page::Devices => {
-                "Not implemented yet. Will list connected devices from `android device` and `adb devices -l`."
-            }
+            Page::SdkVersions | Page::BuildTools | Page::Devices => "",
             Page::Emulators => {
                 "Not implemented yet. Will list and manage AVDs with `android emulator`."
             }
@@ -80,14 +77,18 @@ enum Mutation {
     Install(String),
     Update(String),
     Remove(String),
+    StartEmulator(String),
+    StopEmulator(String),
 }
 
 impl Mutation {
-    fn package(&self) -> &str {
+    fn target(&self) -> &str {
         match self {
-            Mutation::Install(package) | Mutation::Update(package) | Mutation::Remove(package) => {
-                package
-            }
+            Mutation::Install(target)
+            | Mutation::Update(target)
+            | Mutation::Remove(target)
+            | Mutation::StartEmulator(target)
+            | Mutation::StopEmulator(target) => target,
         }
     }
 
@@ -96,6 +97,8 @@ impl Mutation {
             Mutation::Install(_) => "Installed",
             Mutation::Update(_) => "Updated",
             Mutation::Remove(_) => "Removed",
+            Mutation::StartEmulator(_) => "Started",
+            Mutation::StopEmulator(_) => "Stopped",
         }
     }
 
@@ -104,6 +107,8 @@ impl Mutation {
             Mutation::Install(_) => "Installing",
             Mutation::Update(_) => "Updating",
             Mutation::Remove(_) => "Removing",
+            Mutation::StartEmulator(_) => "Starting",
+            Mutation::StopEmulator(_) => "Stopping",
         }
     }
 }
@@ -162,6 +167,56 @@ struct PackageRow {
     installed: bool,
 }
 
+/// A configured AVD or an adb-attached device in the Devices table.
+struct DeviceRow {
+    title: String,
+    kind: &'static str,
+    state: String,
+    details: String,
+    online: bool,
+    state_is_error: bool,
+    action: Option<DeviceAction>,
+}
+
+enum DeviceAction {
+    Start(String),
+    Stop(String),
+}
+
+fn device_state_label(state: &str) -> String {
+    match state {
+        "device" => "Online".to_string(),
+        "unauthorized" => "Unauthorized".to_string(),
+        "offline" => "Offline".to_string(),
+        state => state.to_string(),
+    }
+}
+
+fn adb_device_details(device: &android::Device) -> String {
+    let mut details = Vec::new();
+    if let Some(model) = &device.model {
+        details.push(model.clone());
+    } else if let Some(product) = &device.product {
+        details.push(product.clone());
+    }
+    if let Some(product) = &device.product {
+        if device.model.as_deref() != Some(product) {
+            details.push(format!("product {product}"));
+        }
+    }
+    if let Some(name) = &device.device {
+        details.push(format!("device {name}"));
+    }
+    if let Some(usb) = &device.usb {
+        details.push(format!("USB {usb}"));
+    }
+    if details.is_empty() {
+        "—".to_string()
+    } else {
+        details.join(" · ")
+    }
+}
+
 impl App {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| {
@@ -211,8 +266,8 @@ impl App {
 
         let root = self.sdk.root.clone();
         let cli_process = self.running.clone();
-        let package = mutation.package().to_string();
-        let running = format!("{} {package}…", mutation.gerund());
+        let target = mutation.target().to_string();
+        let running = format!("{} {target}…", mutation.gerund());
         let verb = mutation.verb();
         self.busy = true;
         self.confirm_remove = None;
@@ -230,6 +285,12 @@ impl App {
                 Mutation::Remove(package) => {
                     android::remove(&cli, root.as_deref(), &package, &cli_process)
                 }
+                Mutation::StartEmulator(device) => {
+                    android::start_emulator(&cli, root.as_deref(), &device, &cli_process)
+                }
+                Mutation::StopEmulator(device) => {
+                    android::stop_emulator(&cli, root.as_deref(), &device, &cli_process)
+                }
             }
         });
 
@@ -239,7 +300,7 @@ impl App {
                 this.busy = false;
                 this.sdk = android::snapshot();
                 this.status = Some(match outcome {
-                    Ok(_) => Status::success(format!("{verb} {package}.")),
+                    Ok(_) => Status::success(format!("{verb} {target}.")),
                     Err(err) => Status::error(err),
                 });
                 cx.notify();
@@ -262,6 +323,9 @@ impl App {
                         if this.page != page {
                             this.page = page;
                             this.confirm_remove = None;
+                            if page == Page::Devices {
+                                this.sdk.refresh_devices();
+                            }
                             cx.notify();
                         }
                     });
@@ -365,6 +429,7 @@ impl App {
         match self.page {
             Page::SdkVersions => self.render_sdk_versions(cx),
             Page::BuildTools => self.render_build_tools(cx),
+            Page::Devices => self.render_devices(cx),
             page => Self::render_placeholder(page, cx),
         }
     }
@@ -452,6 +517,302 @@ impl App {
         };
 
         self.render_package_page(rows, summary, empty_title, empty_detail, false, cx)
+    }
+
+    fn render_devices(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.sdk.cli.is_none() {
+            return self.render_cli_missing(cx);
+        }
+
+        let rows = self.device_rows();
+        let total = rows.len();
+        let online = rows.iter().filter(|row| row.online).count();
+        let summary = format!(
+            "{online} online · {total} device{}",
+            if total == 1 { "" } else { "s" }
+        );
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_6()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(
+                Label::new("DEVICE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .flex_1(),
+            )
+            .child(
+                Label::new("TYPE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(90.)),
+            )
+            .child(
+                Label::new("STATE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(110.)),
+            )
+            .child(
+                Label::new("DETAILS")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(300.)),
+            )
+            .child(div().w(px(90.)));
+
+        let mut content = div().flex().flex_col().w_full().child(
+            div()
+                .px_6()
+                .py_2()
+                .child(Label::new(summary).text_size(px(11.)).text_color(muted)),
+        );
+
+        if let Some(error) = &self.sdk.devices_error {
+            content = content.child(Self::render_error(error, cx));
+        }
+        if let Some(status) = &self.status {
+            content = content.child(self.render_status(status, cx));
+        }
+        content = content.child(header);
+
+        if rows.is_empty() {
+            let (title, detail) = if self.sdk.devices_error.is_some() {
+                (
+                    "Device listing unavailable".to_string(),
+                    "Fix the tooling issue above, then click Refresh.".to_string(),
+                )
+            } else {
+                (
+                    "No devices or emulators".to_string(),
+                    "Create an emulator with `android emulator create`, or connect a device \
+                     with USB debugging enabled and accept the debugging prompt."
+                        .to_string(),
+                )
+            };
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_6()
+                    .py_8()
+                    .max_w(px(680.))
+                    .child(
+                        Label::new(title)
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        Label::new(detail)
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .whitespace_normal(),
+                    ),
+            );
+        } else {
+            for (ix, row) in rows.iter().enumerate() {
+                content = content.child(self.render_device_row(row, ix, cx));
+            }
+        }
+
+        content
+            .child(
+                div().px_6().py_4().child(
+                    Label::new(
+                        "Configured AVDs come from `android emulator list --long`; attached \
+                         devices come from `adb devices -l`.",
+                    )
+                    .text_size(px(11.))
+                    .text_color(muted),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn device_rows(&self) -> Vec<DeviceRow> {
+        let mut rows = Vec::new();
+        let mut matched = HashSet::new();
+
+        for emulator in &self.sdk.emulators {
+            let running = emulator.serial.as_ref().and_then(|serial| {
+                self.sdk
+                    .devices
+                    .iter()
+                    .find(|device| &device.serial == serial)
+            });
+            if let Some(device) = running {
+                matched.insert(device.serial.clone());
+            }
+
+            let (state, state_is_error) = match running {
+                Some(device) => (
+                    device_state_label(&device.state),
+                    device.state == "unauthorized" || device.state == "offline",
+                ),
+                None => (emulator.status.clone(), false),
+            };
+            let online = running.map_or_else(|| emulator.is_online(), |device| device.is_online());
+
+            let mut details = Vec::new();
+            if !emulator.name.is_empty() {
+                details.push(emulator.name.clone());
+            }
+            if !emulator.api_level.is_empty() {
+                details.push(emulator.api_level.clone());
+            }
+            if let Some(serial) = &emulator.serial {
+                details.push(format!("serial {serial}"));
+            }
+            if let Some(device) = running {
+                let adb = adb_device_details(device);
+                if adb != "—" {
+                    details.push(adb);
+                }
+            }
+
+            rows.push(DeviceRow {
+                title: emulator.id.clone(),
+                kind: "Emulator",
+                state,
+                details: details.join(" · "),
+                online,
+                state_is_error,
+                action: Some(if online {
+                    DeviceAction::Stop(emulator.id.clone())
+                } else {
+                    DeviceAction::Start(emulator.id.clone())
+                }),
+            });
+        }
+
+        for device in &self.sdk.devices {
+            if matched.contains(&device.serial) {
+                continue;
+            }
+            rows.push(DeviceRow {
+                title: device.serial.clone(),
+                kind: if device.is_emulator {
+                    "Emulator"
+                } else {
+                    "Device"
+                },
+                state: device_state_label(&device.state),
+                details: adb_device_details(device),
+                online: device.is_online(),
+                state_is_error: device.state == "unauthorized" || device.state == "offline",
+                action: None,
+            });
+        }
+
+        rows
+    }
+
+    fn render_device_row(
+        &self,
+        row: &DeviceRow,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        let state_color = if row.online {
+            cx.theme().success
+        } else if row.state_is_error {
+            cx.theme().danger
+        } else {
+            muted
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_6()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div().flex_1().min_w(px(0.)).child(
+                    Label::new(row.title.clone())
+                        .id(("device-serial", ix))
+                        .text_size(px(12.))
+                        .truncate(),
+                ),
+            )
+            .child(
+                Label::new(row.kind)
+                    .id(("device-kind", ix))
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .w(px(90.)),
+            )
+            .child(
+                Label::new(row.state.clone())
+                    .id(("device-state", ix))
+                    .text_size(px(12.))
+                    .text_color(state_color)
+                    .w(px(110.)),
+            )
+            .child(
+                div().w(px(300.)).min_w(px(0.)).child(
+                    Label::new(row.details.clone())
+                        .id(("device-details", ix))
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .truncate(),
+                ),
+            )
+            .child(self.render_device_action(row.action.as_ref(), ix, cx))
+    }
+
+    fn render_device_action(
+        &self,
+        action: Option<&DeviceAction>,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let cell = div().flex().items_center().w(px(90.));
+        let Some(action) = action else {
+            return cell;
+        };
+        let disabled = self.busy || self.sdk.cli.is_none();
+
+        match action {
+            DeviceAction::Start(device) => {
+                let device = device.clone();
+                cell.child(
+                    Button::new(("start-emulator", ix))
+                        .primary()
+                        .small()
+                        .label("Start")
+                        .disabled(disabled)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_mutation(Mutation::StartEmulator(device.clone()), cx);
+                        })),
+                )
+            }
+            DeviceAction::Stop(device) => {
+                let device = device.clone();
+                cell.child(
+                    Button::new(("stop-emulator", ix))
+                        .ghost()
+                        .small()
+                        .label("Stop")
+                        .disabled(disabled)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_mutation(Mutation::StopEmulator(device.clone()), cx);
+                        })),
+                )
+            }
+        }
     }
 
     fn search_query(&self, cx: &mut Context<Self>) -> (String, String) {

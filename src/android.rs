@@ -66,6 +66,43 @@ impl BuildTool {
     }
 }
 
+/// A device reported by `adb devices -l`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Device {
+    /// `adb` serial, e.g. `emulator-5554` or a physical device serial.
+    pub serial: String,
+    /// Raw adb state: `device`, `unauthorized`, `offline`, etc.
+    pub state: String,
+    pub model: Option<String>,
+    pub product: Option<String>,
+    pub device: Option<String>,
+    pub transport_id: Option<String>,
+    pub usb: Option<String>,
+    pub is_emulator: bool,
+}
+
+impl Device {
+    pub fn is_online(&self) -> bool {
+        self.state == "device"
+    }
+}
+
+/// A configured Android Virtual Device from `android emulator list --long`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Emulator {
+    pub id: String,
+    pub name: String,
+    pub api_level: String,
+    pub status: String,
+    pub serial: Option<String>,
+}
+
+impl Emulator {
+    pub fn is_online(&self) -> bool {
+        self.status.eq_ignore_ascii_case("online") || self.status.eq_ignore_ascii_case("running")
+    }
+}
+
 /// A point-in-time view of the SDK that the UI renders.
 #[derive(Clone, Debug, Default)]
 pub struct SdkSnapshot {
@@ -75,8 +112,13 @@ pub struct SdkSnapshot {
     pub root: Option<PathBuf>,
     pub platforms: Vec<Platform>,
     pub build_tools: Vec<BuildTool>,
-    /// Non-fatal CLI or parse failure.
+    pub devices: Vec<Device>,
+    pub emulators: Vec<Emulator>,
+    /// Path to the `adb` binary used for device discovery.
+    pub adb: Option<PathBuf>,
+    /// Non-fatal CLI, adb, or parse failure.
     pub error: Option<String>,
+    pub devices_error: Option<String>,
 }
 
 /// Tracks the running `android` child so shutdown can stop it cleanly.
@@ -234,6 +276,202 @@ fn is_executable(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
+fn adb_binary_name() -> &'static str {
+    if cfg!(windows) { "adb.exe" } else { "adb" }
+}
+
+fn find_adb(root: Option<&std::path::Path>) -> Option<PathBuf> {
+    let name = adb_binary_name();
+    let mut sdk_roots: Vec<PathBuf> = Vec::new();
+    if let Some(root) = root {
+        sdk_roots.push(root.to_path_buf());
+    }
+    for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if let Some(root) = env::var_os(var) {
+            sdk_roots.push(PathBuf::from(root));
+        }
+    }
+
+    for sdk_root in sdk_roots {
+        let adb = sdk_root.join("platform-tools").join(name);
+        if is_executable(&adb) {
+            return Some(adb);
+        }
+    }
+
+    search_paths()
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .find(|path| is_executable(path))
+}
+
+impl SdkSnapshot {
+    /// Refresh configured AVDs and attached devices from the official tooling.
+    pub fn refresh_devices(&mut self) {
+        self.adb = None;
+        self.devices.clear();
+        self.emulators.clear();
+        self.devices_error = None;
+        let mut errors = Vec::new();
+
+        if let Some(cli) = self.cli.clone() {
+            let running = RunningCli::default();
+            match run(
+                &cli,
+                self.root.as_deref(),
+                &["emulator", "list", "--long"],
+                &running,
+            ) {
+                Ok(output) => self.emulators = parse_emulators(&output),
+                Err(err) => errors.push(err),
+            }
+        }
+
+        let Some(adb) = find_adb(self.root.as_deref()) else {
+            errors.push(format!(
+                "`{}` was not found. Install Android SDK Platform-Tools with `android sdk install platform-tools`.",
+                adb_binary_name()
+            ));
+            self.devices_error = Some(errors.join(" "));
+            return;
+        };
+
+        self.adb = Some(adb.clone());
+        let running = RunningCli::default();
+        match run(&adb, None, &["devices", "-l"], &running) {
+            Ok(output) => self.devices = parse_devices(&output),
+            Err(err) => errors.push(err),
+        }
+
+        if !errors.is_empty() {
+            self.devices_error = Some(errors.join(" "));
+        }
+    }
+}
+
+/// Parse `adb devices -l`:
+///
+/// ```text
+/// List of devices attached
+/// emulator-5554 device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a transport_id:1
+/// R58M12345     unauthorized usb:1-1 transport_id:2
+/// ```
+fn parse_devices(output: &str) -> Vec<Device> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with("List of devices attached")
+                || line.starts_with('*')
+            {
+                return None;
+            }
+
+            let mut parts = line.split_whitespace();
+            let serial = parts.next()?.to_string();
+            let state = parts.next()?.to_string();
+            let mut model = None;
+            let mut product = None;
+            let mut device = None;
+            let mut transport_id = None;
+            let mut usb = None;
+
+            for field in parts {
+                let Some((key, value)) = field.split_once(':') else {
+                    continue;
+                };
+                match key {
+                    "model" => model = Some(value.to_string()),
+                    "product" => product = Some(value.to_string()),
+                    "device" => device = Some(value.to_string()),
+                    "transport_id" => transport_id = Some(value.to_string()),
+                    "usb" => usb = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+
+            let is_emulator = serial.starts_with("emulator-");
+            Some(Device {
+                serial,
+                state,
+                model,
+                product,
+                device,
+                transport_id,
+                usb,
+                is_emulator,
+            })
+        })
+        .collect()
+}
+
+/// Parse the fixed-width table from `android emulator list --long`:
+///
+/// ```text
+/// AVD ID                   AVD Name                      API Level      Status         Serial
+/// Medium_Phone_API_37.0    Medium Phone API 37.0         android-37.0   Offline
+/// Pixel_8                  Pixel 8                       android-35     Online         emulator-5554
+/// ```
+fn parse_emulators(output: &str) -> Vec<Emulator> {
+    let mut lines = output.lines();
+    let Some(header) = lines.find(|line| line.contains("AVD ID") && line.contains("AVD Name"))
+    else {
+        return Vec::new();
+    };
+
+    let Some(id_start) = header.find("AVD ID") else {
+        return Vec::new();
+    };
+    let Some(name_start) = header.find("AVD Name") else {
+        return Vec::new();
+    };
+    let Some(api_start) = header.find("API Level") else {
+        return Vec::new();
+    };
+    let Some(status_start) = header.find("Status") else {
+        return Vec::new();
+    };
+    let Some(serial_start) = header.find("Serial") else {
+        return Vec::new();
+    };
+
+    if !(id_start < name_start && name_start < api_start && api_start < status_start)
+        || status_start >= serial_start
+    {
+        return Vec::new();
+    }
+
+    let field = |line: &str, start: usize, end: Option<usize>| {
+        let start = start.min(line.len());
+        let end = end.unwrap_or(line.len()).min(line.len());
+        line.get(start..end).unwrap_or_default().trim().to_string()
+    };
+
+    lines
+        .filter_map(|line| {
+            if line.trim().is_empty() {
+                return None;
+            }
+            let id = field(line, id_start, Some(name_start));
+            if id.is_empty() {
+                return None;
+            }
+            let name = field(line, name_start, Some(api_start));
+            let api_level = field(line, api_start, Some(status_start));
+            let status = field(line, status_start, Some(serial_start));
+            let serial = field(line, serial_start, None);
+            Some(Emulator {
+                id,
+                name,
+                api_level,
+                status,
+                serial: (!serial.is_empty()).then_some(serial),
+            })
+        })
+        .collect()
+}
+
 pub fn snapshot() -> SdkSnapshot {
     let Some(cli) = find_cli() else {
         return SdkSnapshot {
@@ -268,6 +506,7 @@ pub fn snapshot() -> SdkSnapshot {
         }
         Err(err) => snapshot.error = Some(err),
     }
+    snapshot.refresh_devices();
     snapshot
 }
 
@@ -471,8 +710,12 @@ fn run(
             .map(str::trim)
             .find(|line| !line.is_empty())
             .unwrap_or("no output");
+        let program = bin
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("command");
         Err(format!(
-            "`android` exited {}: {}",
+            "`{program}` exited {}: {}",
             output.status,
             truncate(tail, 200)
         ))
@@ -512,6 +755,24 @@ pub fn remove(
     running: &RunningCli,
 ) -> Result<String, String> {
     run(cli, root, &["sdk", "remove", package], running)
+}
+
+pub fn start_emulator(
+    cli: &std::path::Path,
+    root: Option<&std::path::Path>,
+    device: &str,
+    running: &RunningCli,
+) -> Result<String, String> {
+    run(cli, root, &["emulator", "start", device], running)
+}
+
+pub fn stop_emulator(
+    cli: &std::path::Path,
+    root: Option<&std::path::Path>,
+    device: &str,
+    running: &RunningCli,
+) -> Result<String, String> {
+    run(cli, root, &["emulator", "stop", device], running)
 }
 
 #[cfg(test)]
@@ -567,6 +828,68 @@ Available packages:
         assert!(tool.matches("build-tools"));
         assert!(tool.matches("36.0.0"));
         assert!(!tool.matches("35"));
+    }
+
+    #[test]
+    fn parses_adb_devices() {
+        let output = "\
+List of devices attached
+emulator-5554 device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a transport_id:1
+R58M12345 unauthorized usb:1-1 transport_id:2
+";
+        let devices = parse_devices(output);
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(
+            devices[0],
+            Device {
+                serial: "emulator-5554".into(),
+                state: "device".into(),
+                model: Some("sdk_gphone64_arm64".into()),
+                product: Some("sdk_gphone64_arm64".into()),
+                device: Some("emu64a".into()),
+                transport_id: Some("1".into()),
+                usb: None,
+                is_emulator: true,
+            }
+        );
+        assert!(devices[0].is_online());
+        assert_eq!(devices[1].state, "unauthorized");
+        assert_eq!(devices[1].usb.as_deref(), Some("1-1"));
+        assert!(!devices[1].is_online());
+    }
+
+    #[test]
+    fn ignores_adb_noise_and_blank_lines() {
+        let output = "\
+List of devices attached
+
+* daemon not running; starting now at tcp:5037
+";
+        assert!(parse_devices(output).is_empty());
+    }
+
+    #[test]
+    fn parses_emulator_list_long() {
+        let header = "AVD ID                   AVD Name                      API Level      Status         Serial";
+        let offline =
+            "Medium_Phone_API_37.0    Medium Phone API 37.0         android-37.0   Offline";
+        let online = format!(
+            "{:<25}{:<30}{:<15}{:<15}{}",
+            "Pixel_8", "Pixel 8", "android-35", "Online", "emulator-5554"
+        );
+        let output = format!("{header}\n{offline}\n{online}\n");
+
+        let emulators = parse_emulators(&output);
+        assert_eq!(emulators.len(), 2);
+        assert_eq!(emulators[0].id, "Medium_Phone_API_37.0");
+        assert_eq!(emulators[0].name, "Medium Phone API 37.0");
+        assert_eq!(emulators[0].api_level, "android-37.0");
+        assert_eq!(emulators[0].status, "Offline");
+        assert_eq!(emulators[0].serial, None);
+        assert!(!emulators[0].is_online());
+        assert_eq!(emulators[1].serial.as_deref(), Some("emulator-5554"));
+        assert!(emulators[1].is_online());
     }
 
     #[test]
