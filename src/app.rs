@@ -1,6 +1,6 @@
 //! Application shell and the SDK Versions screen.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use gpui_kit::{
     component::{
@@ -157,6 +157,50 @@ struct PackageRow {
     version: String,
     description: String,
     installed: bool,
+}
+
+/// A configured AVD or an adb-attached device in the Devices table.
+struct DeviceRow {
+    title: String,
+    kind: &'static str,
+    state: String,
+    details: String,
+    online: bool,
+    state_is_error: bool,
+}
+
+fn device_state_label(state: &str) -> String {
+    match state {
+        "device" => "Online".to_string(),
+        "unauthorized" => "Unauthorized".to_string(),
+        "offline" => "Offline".to_string(),
+        state => state.to_string(),
+    }
+}
+
+fn adb_device_details(device: &android::Device) -> String {
+    let mut details = Vec::new();
+    if let Some(model) = &device.model {
+        details.push(model.clone());
+    } else if let Some(product) = &device.product {
+        details.push(product.clone());
+    }
+    if let Some(product) = &device.product {
+        if device.model.as_deref() != Some(product) {
+            details.push(format!("product {product}"));
+        }
+    }
+    if let Some(name) = &device.device {
+        details.push(format!("device {name}"));
+    }
+    if let Some(usb) = &device.usb {
+        details.push(format!("USB {usb}"));
+    }
+    if details.is_empty() {
+        "—".to_string()
+    } else {
+        details.join(" · ")
+    }
 }
 
 impl App {
@@ -460,16 +504,15 @@ impl App {
             return self.render_cli_missing(cx);
         }
 
+        let rows = self.device_rows();
+        let total = rows.len();
+        let online = rows.iter().filter(|row| row.online).count();
+        let summary = format!(
+            "{online} online · {total} device{}",
+            if total == 1 { "" } else { "s" }
+        );
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
-        let total = self.sdk.devices.len();
-        let online = self
-            .sdk
-            .devices
-            .iter()
-            .filter(|device| device.is_online())
-            .count();
-        let summary = format!("{online} online · {total} attached");
 
         let header = div()
             .flex()
@@ -516,17 +559,17 @@ impl App {
         }
         content = content.child(header);
 
-        if self.sdk.devices.is_empty() {
+        if rows.is_empty() {
             let (title, detail) = if self.sdk.devices_error.is_some() {
                 (
                     "Device listing unavailable".to_string(),
-                    "Fix the adb issue above, then click Refresh.".to_string(),
+                    "Fix the tooling issue above, then click Refresh.".to_string(),
                 )
             } else {
                 (
-                    "No devices connected".to_string(),
-                    "Start an emulator with `android emulator start <name>`, or connect a \
-                     device with USB debugging enabled and accept the debugging prompt."
+                    "No devices or emulators".to_string(),
+                    "Create an emulator with `android emulator create`, or connect a device \
+                     with USB debugging enabled and accept the debugging prompt."
                         .to_string(),
                 )
             };
@@ -551,8 +594,8 @@ impl App {
                     ),
             );
         } else {
-            for (ix, device) in self.sdk.devices.iter().enumerate() {
-                content = content.child(self.render_device_row(device, ix, cx));
+            for (ix, row) in rows.iter().enumerate() {
+                content = content.child(self.render_device_row(row, ix, cx));
             }
         }
 
@@ -560,7 +603,8 @@ impl App {
             .child(
                 div().px_6().py_4().child(
                     Label::new(
-                        "Devices and states come from `adb devices -l` using the SDK's platform-tools.",
+                        "Configured AVDs come from `android emulator list --long`; attached \
+                         devices come from `adb devices -l`.",
                     )
                     .text_size(px(11.))
                     .text_color(muted),
@@ -569,54 +613,92 @@ impl App {
             .into_any_element()
     }
 
+    fn device_rows(&self) -> Vec<DeviceRow> {
+        let mut rows = Vec::new();
+        let mut matched = HashSet::new();
+
+        for emulator in &self.sdk.emulators {
+            let running = emulator.serial.as_ref().and_then(|serial| {
+                self.sdk
+                    .devices
+                    .iter()
+                    .find(|device| &device.serial == serial)
+            });
+            if let Some(device) = running {
+                matched.insert(device.serial.clone());
+            }
+
+            let (state, state_is_error) = match running {
+                Some(device) => (
+                    device_state_label(&device.state),
+                    device.state == "unauthorized" || device.state == "offline",
+                ),
+                None => (emulator.status.clone(), false),
+            };
+            let online = running.map_or_else(|| emulator.is_online(), |device| device.is_online());
+
+            let mut details = Vec::new();
+            if !emulator.name.is_empty() {
+                details.push(emulator.name.clone());
+            }
+            if !emulator.api_level.is_empty() {
+                details.push(emulator.api_level.clone());
+            }
+            if let Some(serial) = &emulator.serial {
+                details.push(format!("serial {serial}"));
+            }
+            if let Some(device) = running {
+                let adb = adb_device_details(device);
+                if adb != "—" {
+                    details.push(adb);
+                }
+            }
+
+            rows.push(DeviceRow {
+                title: emulator.id.clone(),
+                kind: "Emulator",
+                state,
+                details: details.join(" · "),
+                online,
+                state_is_error,
+            });
+        }
+
+        for device in &self.sdk.devices {
+            if matched.contains(&device.serial) {
+                continue;
+            }
+            rows.push(DeviceRow {
+                title: device.serial.clone(),
+                kind: if device.is_emulator {
+                    "Emulator"
+                } else {
+                    "Device"
+                },
+                state: device_state_label(&device.state),
+                details: adb_device_details(device),
+                online: device.is_online(),
+                state_is_error: device.state == "unauthorized" || device.state == "offline",
+            });
+        }
+
+        rows
+    }
+
     fn render_device_row(
         &self,
-        device: &android::Device,
+        row: &DeviceRow,
         ix: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
-        let state = match device.state.as_str() {
-            "device" => "Online",
-            "unauthorized" => "Unauthorized",
-            "offline" => "Offline",
-            state => state,
-        };
-        let state_color = if device.is_online() {
+        let state_color = if row.online {
             cx.theme().success
-        } else if device.state == "unauthorized" || device.state == "offline" {
+        } else if row.state_is_error {
             cx.theme().danger
         } else {
             muted
-        };
-        let kind = if device.is_emulator {
-            "Emulator"
-        } else {
-            "Device"
-        };
-
-        let mut details = Vec::new();
-        if let Some(model) = &device.model {
-            details.push(model.clone());
-        } else if let Some(product) = &device.product {
-            details.push(product.clone());
-        }
-        if let Some(product) = &device.product {
-            if device.model.as_deref() != Some(product) {
-                details.push(format!("product {product}"));
-            }
-        }
-        if let Some(device_name) = &device.device {
-            details.push(format!("device {device_name}"));
-        }
-        if let Some(usb) = &device.usb {
-            details.push(format!("USB {usb}"));
-        }
-        let details = if details.is_empty() {
-            "—".to_string()
-        } else {
-            details.join(" · ")
         };
 
         div()
@@ -629,21 +711,21 @@ impl App {
             .border_color(border)
             .child(
                 div().flex_1().min_w(px(0.)).child(
-                    Label::new(device.serial.clone())
+                    Label::new(row.title.clone())
                         .id(("device-serial", ix))
                         .text_size(px(12.))
                         .truncate(),
                 ),
             )
             .child(
-                Label::new(kind)
+                Label::new(row.kind)
                     .id(("device-kind", ix))
                     .text_size(px(12.))
                     .text_color(muted)
                     .w(px(90.)),
             )
             .child(
-                Label::new(state)
+                Label::new(row.state.clone())
                     .id(("device-state", ix))
                     .text_size(px(12.))
                     .text_color(state_color)
@@ -651,7 +733,7 @@ impl App {
             )
             .child(
                 div().flex_1().min_w(px(0.)).child(
-                    Label::new(details)
+                    Label::new(row.details.clone())
                         .id(("device-details", ix))
                         .text_size(px(12.))
                         .text_color(muted)

@@ -87,6 +87,22 @@ impl Device {
     }
 }
 
+/// A configured Android Virtual Device from `android emulator list --long`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Emulator {
+    pub id: String,
+    pub name: String,
+    pub api_level: String,
+    pub status: String,
+    pub serial: Option<String>,
+}
+
+impl Emulator {
+    pub fn is_online(&self) -> bool {
+        self.status.eq_ignore_ascii_case("online") || self.status.eq_ignore_ascii_case("running")
+    }
+}
+
 /// A point-in-time view of the SDK that the UI renders.
 #[derive(Clone, Debug, Default)]
 pub struct SdkSnapshot {
@@ -97,6 +113,7 @@ pub struct SdkSnapshot {
     pub platforms: Vec<Platform>,
     pub build_tools: Vec<BuildTool>,
     pub devices: Vec<Device>,
+    pub emulators: Vec<Emulator>,
     /// Path to the `adb` binary used for device discovery.
     pub adb: Option<PathBuf>,
     /// Non-fatal CLI, adb, or parse failure.
@@ -289,17 +306,33 @@ fn find_adb(root: Option<&std::path::Path>) -> Option<PathBuf> {
 }
 
 impl SdkSnapshot {
-    /// Refresh attached devices from the SDK's `adb devices -l`.
+    /// Refresh configured AVDs and attached devices from the official tooling.
     pub fn refresh_devices(&mut self) {
         self.adb = None;
         self.devices.clear();
+        self.emulators.clear();
         self.devices_error = None;
+        let mut errors = Vec::new();
+
+        if let Some(cli) = self.cli.clone() {
+            let running = RunningCli::default();
+            match run(
+                &cli,
+                self.root.as_deref(),
+                &["emulator", "list", "--long"],
+                &running,
+            ) {
+                Ok(output) => self.emulators = parse_emulators(&output),
+                Err(err) => errors.push(err),
+            }
+        }
 
         let Some(adb) = find_adb(self.root.as_deref()) else {
-            self.devices_error = Some(format!(
+            errors.push(format!(
                 "`{}` was not found. Install Android SDK Platform-Tools with `android sdk install platform-tools`.",
                 adb_binary_name()
             ));
+            self.devices_error = Some(errors.join(" "));
             return;
         };
 
@@ -307,7 +340,11 @@ impl SdkSnapshot {
         let running = RunningCli::default();
         match run(&adb, None, &["devices", "-l"], &running) {
             Ok(output) => self.devices = parse_devices(&output),
-            Err(err) => self.devices_error = Some(err),
+            Err(err) => errors.push(err),
+        }
+
+        if !errors.is_empty() {
+            self.devices_error = Some(errors.join(" "));
         }
     }
 }
@@ -364,6 +401,72 @@ fn parse_devices(output: &str) -> Vec<Device> {
                 transport_id,
                 usb,
                 is_emulator,
+            })
+        })
+        .collect()
+}
+
+/// Parse the fixed-width table from `android emulator list --long`:
+///
+/// ```text
+/// AVD ID                   AVD Name                      API Level      Status         Serial
+/// Medium_Phone_API_37.0    Medium Phone API 37.0         android-37.0   Offline
+/// Pixel_8                  Pixel 8                       android-35     Online         emulator-5554
+/// ```
+fn parse_emulators(output: &str) -> Vec<Emulator> {
+    let mut lines = output.lines();
+    let Some(header) = lines.find(|line| line.contains("AVD ID") && line.contains("AVD Name"))
+    else {
+        return Vec::new();
+    };
+
+    let Some(id_start) = header.find("AVD ID") else {
+        return Vec::new();
+    };
+    let Some(name_start) = header.find("AVD Name") else {
+        return Vec::new();
+    };
+    let Some(api_start) = header.find("API Level") else {
+        return Vec::new();
+    };
+    let Some(status_start) = header.find("Status") else {
+        return Vec::new();
+    };
+    let Some(serial_start) = header.find("Serial") else {
+        return Vec::new();
+    };
+
+    if !(id_start < name_start && name_start < api_start && api_start < status_start)
+        || status_start >= serial_start
+    {
+        return Vec::new();
+    }
+
+    let field = |line: &str, start: usize, end: Option<usize>| {
+        let start = start.min(line.len());
+        let end = end.unwrap_or(line.len()).min(line.len());
+        line.get(start..end).unwrap_or_default().trim().to_string()
+    };
+
+    lines
+        .filter_map(|line| {
+            if line.trim().is_empty() {
+                return None;
+            }
+            let id = field(line, id_start, Some(name_start));
+            if id.is_empty() {
+                return None;
+            }
+            let name = field(line, name_start, Some(api_start));
+            let api_level = field(line, api_start, Some(status_start));
+            let status = field(line, status_start, Some(serial_start));
+            let serial = field(line, serial_start, None);
+            Some(Emulator {
+                id,
+                name,
+                api_level,
+                status,
+                serial: (!serial.is_empty()).then_some(serial),
             })
         })
         .collect()
@@ -746,6 +849,29 @@ List of devices attached
 * daemon not running; starting now at tcp:5037
 ";
         assert!(parse_devices(output).is_empty());
+    }
+
+    #[test]
+    fn parses_emulator_list_long() {
+        let header = "AVD ID                   AVD Name                      API Level      Status         Serial";
+        let offline =
+            "Medium_Phone_API_37.0    Medium Phone API 37.0         android-37.0   Offline";
+        let online = format!(
+            "{:<25}{:<30}{:<15}{:<15}{}",
+            "Pixel_8", "Pixel 8", "android-35", "Online", "emulator-5554"
+        );
+        let output = format!("{header}\n{offline}\n{online}\n");
+
+        let emulators = parse_emulators(&output);
+        assert_eq!(emulators.len(), 2);
+        assert_eq!(emulators[0].id, "Medium_Phone_API_37.0");
+        assert_eq!(emulators[0].name, "Medium Phone API 37.0");
+        assert_eq!(emulators[0].api_level, "android-37.0");
+        assert_eq!(emulators[0].status, "Offline");
+        assert_eq!(emulators[0].serial, None);
+        assert!(!emulators[0].is_online());
+        assert_eq!(emulators[1].serial.as_deref(), Some("emulator-5554"));
+        assert!(emulators[1].is_online());
     }
 
     #[test]
