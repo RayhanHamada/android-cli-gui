@@ -44,6 +44,34 @@ Prebuilt macOS disk images (Apple Silicon and Intel), Windows and Linux
 archives, and checksums are on the
 [releases page](https://github.com/RayhanHamada/android-cli-gui/releases).
 
+## Roadmap
+
+No dates; the order reflects priority. A feature appears only when the official
+Android CLI exposes the data or action it needs.
+
+| Status | Area | Scope |
+| --- | --- | --- |
+| Shipped | SDK versions | List installed and available platforms; install, update, and remove them through `android sdk`. |
+| Shipped | Build tools | The same list and lifecycle operations for `build-tools/*` packages. |
+| Shipped | Devices | List every AVD from `android emulator list --long`, merge attached devices from `adb devices -l`, and start or stop AVDs. |
+| Shipped | macOS distribution | Launchable app bundle, Homebrew cask, DMG and zip release assets. |
+| Next | Emulators | AVD details, create/remove, cold boot, and headless start options. |
+| Next | Settings | Resolved SDK root, CLI and Java versions, and environment information; read-only first. |
+| Next | Device workflows | `android device hub` mirroring and `android device remote` reservations. |
+| Next | Distribution trust | Developer ID signing and Apple notarization so the cask opens without a Gatekeeper prompt. |
+| Later | Project workflows | Create, build, run, and install projects; `describe` and APK analysis. |
+| Later | Diagnostics | Screen capture, input, Compose previews, profiler, signals, and Studio bridge. |
+| Later | Other platforms | First-class Linux and Windows installers and update flow. |
+
+### Principles
+
+- The official Android CLI remains the source of truth; the app does not edit
+  SDK files or bundle the SDK.
+- Prefer actions the CLI supports over reimplementing `adb`, the emulator, or
+  Android build tooling.
+- Keep the UI usable when the CLI or a platform tool is missing, and report the
+  exact command needed to fix it.
+
 ## Build from source
 
 Requires Rust stable and the [GPUI platform dependencies](https://gpui-kit.com/docs/installation/).
