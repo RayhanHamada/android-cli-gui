@@ -44,7 +44,7 @@ impl Page {
             Page::BuildTools => {
                 "Android SDK Build-Tools — installed and available, read from the Android CLI."
             }
-            Page::Devices => "Connected devices and emulators.",
+            Page::Devices => "Devices connected through adb, including running emulators.",
             Page::Emulators => "Android Virtual Devices.",
             Page::Settings => "SDK root, Java, and CLI configuration.",
         }
@@ -52,10 +52,7 @@ impl Page {
 
     fn body(self) -> &'static str {
         match self {
-            Page::SdkVersions | Page::BuildTools => "",
-            Page::Devices => {
-                "Not implemented yet. Will list connected devices from `android device` and `adb devices -l`."
-            }
+            Page::SdkVersions | Page::BuildTools | Page::Devices => "",
             Page::Emulators => {
                 "Not implemented yet. Will list and manage AVDs with `android emulator`."
             }
@@ -262,6 +259,9 @@ impl App {
                         if this.page != page {
                             this.page = page;
                             this.confirm_remove = None;
+                            if page == Page::Devices {
+                                this.sdk.refresh_devices();
+                            }
                             cx.notify();
                         }
                     });
@@ -365,6 +365,7 @@ impl App {
         match self.page {
             Page::SdkVersions => self.render_sdk_versions(cx),
             Page::BuildTools => self.render_build_tools(cx),
+            Page::Devices => self.render_devices(cx),
             page => Self::render_placeholder(page, cx),
         }
     }
@@ -452,6 +453,211 @@ impl App {
         };
 
         self.render_package_page(rows, summary, empty_title, empty_detail, false, cx)
+    }
+
+    fn render_devices(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.sdk.cli.is_none() {
+            return self.render_cli_missing(cx);
+        }
+
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        let total = self.sdk.devices.len();
+        let online = self
+            .sdk
+            .devices
+            .iter()
+            .filter(|device| device.is_online())
+            .count();
+        let summary = format!("{online} online · {total} attached");
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_6()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(
+                Label::new("DEVICE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .flex_1(),
+            )
+            .child(
+                Label::new("TYPE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(90.)),
+            )
+            .child(
+                Label::new("STATE")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .w(px(110.)),
+            )
+            .child(
+                Label::new("DETAILS")
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .flex_1(),
+            );
+
+        let mut content = div().flex().flex_col().w_full().child(
+            div()
+                .px_6()
+                .py_2()
+                .child(Label::new(summary).text_size(px(11.)).text_color(muted)),
+        );
+
+        if let Some(error) = &self.sdk.devices_error {
+            content = content.child(Self::render_error(error, cx));
+        }
+        content = content.child(header);
+
+        if self.sdk.devices.is_empty() {
+            let (title, detail) = if self.sdk.devices_error.is_some() {
+                (
+                    "Device listing unavailable".to_string(),
+                    "Fix the adb issue above, then click Refresh.".to_string(),
+                )
+            } else {
+                (
+                    "No devices connected".to_string(),
+                    "Start an emulator with `android emulator start <name>`, or connect a \
+                     device with USB debugging enabled and accept the debugging prompt."
+                        .to_string(),
+                )
+            };
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_6()
+                    .py_8()
+                    .max_w(px(680.))
+                    .child(
+                        Label::new(title)
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        Label::new(detail)
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .whitespace_normal(),
+                    ),
+            );
+        } else {
+            for (ix, device) in self.sdk.devices.iter().enumerate() {
+                content = content.child(self.render_device_row(device, ix, cx));
+            }
+        }
+
+        content
+            .child(
+                div().px_6().py_4().child(
+                    Label::new(
+                        "Devices and states come from `adb devices -l` using the SDK's platform-tools.",
+                    )
+                    .text_size(px(11.))
+                    .text_color(muted),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_device_row(
+        &self,
+        device: &android::Device,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        let state = match device.state.as_str() {
+            "device" => "Online",
+            "unauthorized" => "Unauthorized",
+            "offline" => "Offline",
+            state => state,
+        };
+        let state_color = if device.is_online() {
+            cx.theme().success
+        } else if device.state == "unauthorized" || device.state == "offline" {
+            cx.theme().danger
+        } else {
+            muted
+        };
+        let kind = if device.is_emulator {
+            "Emulator"
+        } else {
+            "Device"
+        };
+
+        let mut details = Vec::new();
+        if let Some(model) = &device.model {
+            details.push(model.clone());
+        } else if let Some(product) = &device.product {
+            details.push(product.clone());
+        }
+        if let Some(product) = &device.product {
+            if device.model.as_deref() != Some(product) {
+                details.push(format!("product {product}"));
+            }
+        }
+        if let Some(device_name) = &device.device {
+            details.push(format!("device {device_name}"));
+        }
+        if let Some(usb) = &device.usb {
+            details.push(format!("USB {usb}"));
+        }
+        let details = if details.is_empty() {
+            "—".to_string()
+        } else {
+            details.join(" · ")
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_6()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div().flex_1().min_w(px(0.)).child(
+                    Label::new(device.serial.clone())
+                        .id(("device-serial", ix))
+                        .text_size(px(12.))
+                        .truncate(),
+                ),
+            )
+            .child(
+                Label::new(kind)
+                    .id(("device-kind", ix))
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .w(px(90.)),
+            )
+            .child(
+                Label::new(state)
+                    .id(("device-state", ix))
+                    .text_size(px(12.))
+                    .text_color(state_color)
+                    .w(px(110.)),
+            )
+            .child(
+                div().flex_1().min_w(px(0.)).child(
+                    Label::new(details)
+                        .id(("device-details", ix))
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .truncate(),
+                ),
+            )
     }
 
     fn search_query(&self, cx: &mut Context<Self>) -> (String, String) {

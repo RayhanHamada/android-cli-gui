@@ -3,8 +3,9 @@
 [![CI](https://github.com/RayhanHamada/android-cli-gui/actions/workflows/ci.yml/badge.svg)](https://github.com/RayhanHamada/android-cli-gui/actions/workflows/ci.yml)
 
 Unofficial GUI for the [Android CLI](https://developer.android.com/tools/agents/android-cli).
-Manage Android SDK platforms and build tools without installing Android Studio. Data
-comes from the official Android CLI and Android SDK sources.
+Manage Android SDK platforms and build tools, inspect connected devices and
+emulators, without installing Android Studio. Data comes from the official
+Android CLI and Android SDK sources.
 
 ## Install
 
