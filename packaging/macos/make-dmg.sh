@@ -37,10 +37,11 @@ mkdir -p "$(dirname "$output")"
 output_dir="$(cd "$(dirname "$output")" && pwd)"
 output="$output_dir/$(basename "$output")"
 rm -f "$output"
-diskutil image create from \
-  --format UDZO \
-  --volumeName "Android CLI GUI" \
-  "$staging/root" \
+hdiutil create \
+  -volname "Android CLI GUI" \
+  -srcfolder "$staging/root" \
+  -ov \
+  -format UDZO \
   "$output" >/dev/null
 hdiutil verify "$output" >/dev/null
 
