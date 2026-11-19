@@ -116,6 +116,8 @@ jobs:
           mkdir -p dist
           ditto -c -k --sequesterRsrc --keepParent "$app" \
             "dist/android-cli-gui-v${VERSION}-${{ matrix.artifact }}.zip"
+          packaging/macos/make-dmg.sh "$app" "$VERSION" \
+            "dist/android-cli-gui-v${VERSION}-${{ matrix.artifact }}.dmg"
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -191,8 +193,8 @@ jobs:
 
           sed \
             -e "s/__VERSION__/${VERSION}/g" \
-            -e "s/__SHA256_MACOS_ARM64__/$(sha "android-cli-gui-v${VERSION}-macos-arm64.zip")/g" \
-            -e "s/__SHA256_MACOS_X86_64__/$(sha "android-cli-gui-v${VERSION}-macos-x86_64.zip")/g" \
+            -e "s/__SHA256_MACOS_ARM64__/$(sha "android-cli-gui-v${VERSION}-macos-arm64.dmg")/g" \
+            -e "s/__SHA256_MACOS_X86_64__/$(sha "android-cli-gui-v${VERSION}-macos-x86_64.dmg")/g" \
             packaging/homebrew/android-cli-gui.cask.rb.tmpl \
             > dist/android-cli-gui.rb
 

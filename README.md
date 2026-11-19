@@ -39,8 +39,8 @@ If you installed the old formula, remove it before switching:
 brew uninstall android-cli-gui
 ```
 
-Prebuilt applications for macOS (Apple Silicon and Intel), binaries for Linux
-and Windows, and checksums are on the
+Prebuilt macOS disk images (Apple Silicon and Intel), Windows and Linux
+archives, and checksums are on the
 [releases page](https://github.com/RayhanHamada/android-cli-gui/releases).
 
 ## Build from source
@@ -58,6 +58,8 @@ cargo build --release
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)"
 packaging/macos/make-app.sh target/release/android-cli-gui "$version" \
   "target/Android CLI GUI.app"
+packaging/macos/make-dmg.sh "target/Android CLI GUI.app" "$version" \
+  "target/android-cli-gui-v${version}-macos-arm64.dmg"
 open "target/Android CLI GUI.app"
 ```
 
